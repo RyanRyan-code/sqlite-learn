@@ -343,7 +343,58 @@ Source:
 
 ## B-trees
 
-A table is usually stored as a b-tree. A b-tree is a tree of pages:
+A b-tree is a search tree designed for storage systems.
+
+The central idea is to keep keys sorted, but group many keys together in each
+tree node. Each node divides the key space into ranges.
+
+A tiny conceptual b-tree might look like:
+
+```text
+root node:
+  keys: 100, 250
+
+  child A: keys <= 100
+  child B: keys > 100 and <= 250
+  child C: keys > 250
+```
+
+To find key `180`, search the root keys:
+
+```text
+180 is > 100 and <= 250
+go to child B
+```
+
+Then repeat until reaching a leaf.
+
+The reason databases like b-trees is fanout. One node can contain many keys and
+many child pointers, so the tree is shallow:
+
+```text
+root
+  -> interior
+    -> leaf
+```
+
+Even a huge table might need only a few page reads to reach the right leaf.
+
+Important properties:
+
+```text
+keys are kept sorted
+interior nodes route searches to child ranges
+leaf nodes contain the final entries
+the tree is kept balanced so paths are short
+```
+
+This is different from a binary tree, where each node has one key and two
+children. A database b-tree node may have hundreds of keys and child pointers.
+
+## SQLite b-trees
+
+A table is usually stored as a b-tree. In SQLite, b-tree nodes are database
+pages:
 
 ```text
 root page
