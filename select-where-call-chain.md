@@ -210,6 +210,15 @@ LHS ::= prefix * rest  currently inside this rule; prefix already matched
 LHS ::= RHS *          complete rule; ready to reduce
 ```
 
+When `parse.out` prints a rule number in parentheses, that item is complete/reducible:
+
+```text
+(100) distinct ::= *        empty rule is complete
+(180) expr ::= ID *         ID can reduce to expr
+```
+
+The action list still decides whether that reduce happens for the current lookahead. For example, `{default} reduce 100` means unmatched lookahead tokens reduce by rule `100`.
+
 Example:
 
 ```text
