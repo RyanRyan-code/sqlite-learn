@@ -193,6 +193,24 @@ A key nuance: the parser never re-matches old input. The parser stack keeps the 
 current top state + incoming token -> next action
 ```
 
+The parser stack is the generated parser's memory. Each entry is roughly:
+
+```c
+struct yyStackEntry {
+  YYACTIONTYPE stateno;  /* parser state number */
+  YYCODETYPE major;      /* token/non-terminal symbol */
+  YYMINORTYPE minor;     /* semantic value */
+};
+```
+
+So the stack is not just states. It is:
+
+```text
+symbol + semantic value + state reached after that symbol
+```
+
+Reductions do not consume the lookahead token. They only change the stack. A shift is what finally consumes the lookahead and pushes it onto the stack.
+
 To read a state in `parse.out`, look for the `*`:
 
 ```text
