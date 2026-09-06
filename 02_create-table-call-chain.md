@@ -36,6 +36,132 @@ sqlite3_step()
             -> sqlite3BtreeCommitPhaseTwo()
 ```
 
+## How prepare() adds this opcode
+
+Before `sqlite3_step()` can run anything, `sqlite3_prepare_v2()` compiles the SQL
+text into the VDBE program shown below:
+
+```text
+sqlite3_prepare_v2()
+  -> sqlite3LockAndPrepare()
+    -> sqlite3Prepare()
+      -> sqlite3RunParser()
+        -> parse.y CREATE TABLE actions
+          -> sqlite3StartTable()
+             emits OP_CreateBtree
+          -> sqlite3EndTable()
+             emits the final sqlite_schema update
+```
+
+The `CREATE TABLE` grammar action in `parse.y` calls `sqlite3StartTable()` when
+it has seen:
+
+```sql
+CREATE TABLE t
+```
+
+Then the closing `)` action calls `sqlite3EndTable()` after the column list is
+known.
+
+The actual `OP_CreateBtree` instruction is appended in `sqlite3StartTable()`:
+
+```c
+pParse->u1.cr.addrCrTab =
+   sqlite3VdbeAddOp3(v, OP_CreateBtree, iDb, reg2, BTREE_INTKEY);
+```
+
+That one call chooses the operands:
+
+- `P1 = iDb`: which attached database gets the new b-tree.
+- `P2 = reg2`: which VM register will receive the new root page number.
+- `P3 = BTREE_INTKEY`: create a rowid-table b-tree.
+
+`sqlite3VdbeAddOp3()` copies those values into the next `VdbeOp` slot. They are
+not runtime scratch values; they are part of the prepared statement's bytecode.
+Later compile-time helpers may patch them before execution. For example,
+`convertToWithoutRowidTable()` changes this opcode's `P3` from `BTREE_INTKEY` to
+`BTREE_BLOBKEY` for a `WITHOUT ROWID` table.
+
+`sqlite3EndTable()` then uses the saved registers from `sqlite3StartTable()`:
+
+- `pParse->u1.cr.regRoot`: the register where `OP_CreateBtree` will put the
+  root page.
+- `pParse->u1.cr.regRowid`: the rowid of the placeholder `sqlite_schema` row.
+
+It emits an internal schema update with `sqlite3NestedParse()` so the final
+`sqlite_schema` record gets the real table name, root page, and SQL text.
+
+Source:
+
+- `sqlite/src/prepare.c:937` implements `sqlite3_prepare_v2()`.
+- `sqlite/src/prepare.c:836` implements `sqlite3LockAndPrepare()`.
+- `sqlite/src/prepare.c:779` calls `sqlite3RunParser()`.
+- `sqlite/src/parse.y:209` calls `sqlite3StartTable()` for `CREATE TABLE`.
+- `sqlite/src/parse.y:224` calls `sqlite3EndTable()` after the column list.
+- `sqlite/src/build.c:1206` implements `sqlite3StartTable()`.
+- `sqlite/src/build.c:1374` emits `OP_CreateBtree`.
+- `sqlite/src/vdbeaux.c:272` implements `sqlite3VdbeAddOp3()`.
+- `sqlite/src/vdbeaux.c:288` stores `p1`, `p2`, and `p3` into the opcode.
+- `sqlite/src/build.c:2376` patches `P3` for `WITHOUT ROWID`.
+- `sqlite/src/build.c:2637` implements `sqlite3EndTable()`.
+- `sqlite/src/build.c:2909` emits the final schema-table update through
+  `sqlite3NestedParse()`.
+
+## Where r[1], r[2], r[3] live
+
+The `P1`, `P2`, and `P3` values are fields in a `VdbeOp`. They are instruction
+operands. The `r[1]`, `r[2]`, and `r[3]` values are different: they are runtime
+registers in the VM's `Mem *aMem` array.
+
+At execution time, `sqlite3VdbeExec()` keeps a local copy:
+
+```c
+Mem *aMem = p->aMem;
+```
+
+So an opcode operand that names a register is just an integer index into
+`aMem[]`. For example, `CreateBtree 0 2 1` has `P2 = 2`, so `out2Prerelease()`
+returns `&p->aMem[pOp->p2]`, meaning register `r[2]`.
+
+For the early `CREATE TABLE` bytecode:
+
+```text
+CreateBtree 0 2 1   -> writes the new root page into r[2]
+NewRowid    0 1 0   -> writes the sqlite_schema rowid into r[1]
+Blob        6 3 0   -> writes the placeholder blob into r[3]
+Insert      0 3 1   -> reads record data from r[3], rowid key from r[1]
+```
+
+So:
+
+```text
+P2 = 2       fixed bytecode operand
+r[2] = pgno  runtime value stored in p->aMem[2]
+```
+
+The register numbers are picked during prepare/code generation. `sqlite3StartTable()`
+stores the important ones in parse state:
+
+```text
+pParse->u1.cr.regRoot   -> register that will receive the table root page
+pParse->u1.cr.regRowid  -> register that will receive the schema rowid
+```
+
+Later code generation emits more opcodes that refer to those same register
+numbers. The values themselves are produced only when `sqlite3_step()` runs the
+VM.
+
+Source:
+
+- `sqlite/src/vdbeInt.h:474` stores the VM register array as `Vdbe.aMem`.
+- `sqlite/src/vdbe.c:865` copies `p->aMem` into local `aMem` in
+  `sqlite3VdbeExec()`.
+- `sqlite/src/vdbe.c:672` implements `out2Prerelease()`.
+- `sqlite/src/vdbe.c:676` resolves an output register with `&p->aMem[pOp->p2]`.
+- `sqlite/src/vdbe.c:5601` uses `out2Prerelease()` for `OP_NewRowid`.
+- `sqlite/src/vdbe.c:5757` reads `OP_Insert` data from `aMem[pOp->p2]`.
+- `sqlite/src/vdbe.c:5770` reads `OP_Insert` rowid/key from `aMem[pOp->p3]`.
+
 ## The bytecode spine
 
 From:
