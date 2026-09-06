@@ -186,6 +186,32 @@ right of * = still expected
 
 A state is not the full history. It is a local summary. The parser stack of states preserves the larger context.
 
+Practical reading heuristic:
+
+```text
+LHS ::= * RHS          possible thing to start next
+LHS ::= prefix * rest  currently inside this rule; prefix already matched
+LHS ::= RHS *          complete rule; ready to reduce
+```
+
+Example:
+
+```text
+trigger_cmd ::= scanpt insert_cmd INTO xfullname idlist_opt * select upsert scanpt
+```
+
+This is a context/progress item. It says this state was reached inside an INSERT-style trigger command, after matching the prefix up through `idlist_opt`; now it needs a `select`.
+
+Items like:
+
+```text
+select ::= * WITH wqlist selectnowith
+oneselect ::= * SELECT distinct selcollist from ...
+values ::= * VALUES LP nexprlist RP
+```
+
+are expansion items. They describe possible ways to satisfy the needed `select`.
+
 ## Parser Trace
 
 With a debug build:
