@@ -379,6 +379,27 @@ b-tree page. The resulting root page number goes into `r[2]`.
 The implementation has a few compact checks that are worth unpacking:
 
 ```c
+sqlite3VdbeIncrWriteCounter(p, 0);
+```
+
+This is debug-only write bookkeeping. In a `SQLITE_DEBUG` build,
+`sqlite3VdbeIncrWriteCounter()` is a real function in `vdbeaux.c` that increments
+`p->nWrite` when the operation counts as a real write. Passing cursor `0` means
+"there is no cursor to inspect, so count it."
+
+In a non-debug build, the same name is a macro that expands to nothing:
+
+```c
+# define sqlite3VdbeIncrWriteCounter(V,C)
+```
+
+That works because the function declaration and the function implementation are
+also inside the `SQLITE_DEBUG` branch. So there is no build where the macro is
+active and SQLite also tries to compile a same-named function definition. In
+debug builds calls are real calls; in release builds calls become an empty
+statement after preprocessing.
+
+```c
 rc = sqlite3BtreeCreateTable(pDb->pBt, &pgno, pOp->p3);
 if( rc ) goto abort_due_to_error;
 ```
@@ -451,6 +472,11 @@ Source:
 
 - `sqlite/src/vdbe.c:7032` implements `OP_CreateBtree`.
 - `sqlite/src/vdbe.c:7045` calls `sqlite3BtreeCreateTable()`.
+- `sqlite/src/vdbeaux.c:829` implements `sqlite3VdbeIncrWriteCounter()` in
+  `SQLITE_DEBUG` builds.
+- `sqlite/src/vdbeInt.h:704` declares `sqlite3VdbeIncrWriteCounter()` in debug
+  builds and defines it as an empty macro otherwise.
+- `sqlite/src/vdbeInt.h:494` stores the debug `Vdbe.nWrite` counter.
 - `sqlite/src/btree.c:10199` wraps `btreeCreateTable()`.
 - `sqlite/src/btree.c:10183` allocates the root page in the non-autovacuum case.
 - `sqlite/src/btree.c:10188` chooses table-page flags for `BTREE_INTKEY`.
