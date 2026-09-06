@@ -177,6 +177,16 @@ special values              -> accept, error, or no action
 
 So the huge `yy_action[]` table is the parser's precomputed decision table. Runtime parsing is mostly table lookup plus stack updates.
 
+In `parse.out`, each state's action list is the readable version of part of that table:
+
+```text
+symbol -> action
+```
+
+Uppercase symbols are usually tokenizer tokens, like `SELECT` or `VALUES`. Lowercase symbols are non-terminals produced by reductions, like `select`, `oneselect`, or `values`.
+
+If an action is not listed, the parser uses `{default}` if the state has one. If there is no listed action and no usable default, that table entry is an error/no-action.
+
 To read a state in `parse.out`, look for the `*`:
 
 ```text
