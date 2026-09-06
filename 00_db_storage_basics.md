@@ -140,6 +140,70 @@ to those pages transactional.
 The pager does not know whether page 42 is a table leaf, an index page, an
 overflow page, or a freelist page. It mostly sees page numbers and raw bytes.
 
+## Pager vs page cache
+
+The pager is the manager. The page cache is one subsystem the pager uses.
+
+```text
+b-tree
+  -> pager
+    -> page cache
+    -> rollback journal / WAL
+    -> locks
+    -> VFS / OS file
+```
+
+The page cache answers memory-cache questions:
+
+```text
+Do we already have page 42 in memory?
+Can we keep this page around?
+Which clean page can be evicted?
+Which pages are dirty?
+```
+
+The pager answers transaction/storage questions:
+
+```text
+If page 42 is not cached, should I read it from the database file or WAL?
+Before modifying page 42, has the old version been journaled?
+Is this connection allowed to write right now?
+When do dirty pages get flushed?
+What happens if the transaction rolls back?
+What happens after a crash?
+```
+
+The object relationship is roughly:
+
+```text
+Pager
+  owns/uses PCache
+
+PCache
+  contains cached PgHdr pages
+
+PgHdr / DbPage
+  has pgno, pData, dirty flags, refcount, cache links
+```
+
+So when b-tree asks:
+
+```c
+sqlite3PagerGet(pPager, 42, &pDbPage, flags);
+```
+
+the pager checks the page cache. If page 42 is already there, the pager returns
+the existing `PgHdr/DbPage`. If not, it fetches or allocates a cache entry and
+fills `pData` from the database file, WAL, zeros, or another appropriate source.
+
+Source:
+
+- `sqlite/src/pcache.c:41` defines `struct PCache`.
+- `sqlite/src/pcache.h:94` declares `sqlite3PcacheFetch()`.
+- `sqlite/src/pcache.h:112` declares `sqlite3PcacheDirtyList()`.
+- `sqlite/src/pager.c:5598` fetches a page from the pager's page cache.
+- `sqlite/src/pager.c:5608` converts the cache object into a `PgHdr`.
+
 ## Page number vs memory pointer
 
 A C pointer is only an in-memory address. It is not a durable storage address.
