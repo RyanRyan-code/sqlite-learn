@@ -376,6 +376,77 @@ OP_CreateBtree
 The new page is not filled with rows. It is initialized as an empty leaf table
 b-tree page. The resulting root page number goes into `r[2]`.
 
+The implementation has a few compact checks that are worth unpacking:
+
+```c
+rc = sqlite3BtreeCreateTable(pDb->pBt, &pgno, pOp->p3);
+if( rc ) goto abort_due_to_error;
+```
+
+`rc` means return code. SQLite uses `SQLITE_OK` as success, which is zero, so
+`if( rc )` means "if the b-tree create call returned any error code, stop this
+VM program and go through the normal error path."
+
+```c
+assert( pOp->p1>=0 && pOp->p1<db->nDb );
+pDb = &db->aDb[pOp->p1];
+```
+
+`db->aDb[]` is the connection's array of database slots: usually `main`,
+`temp`, then any attached databases. `db->nDb` is the number of slots currently
+in that array. So `pOp->p1 < db->nDb` is just a bounds check before using
+`pOp->p1` as an array index.
+
+```c
+assert( DbMaskTest(p->btreeMask, pOp->p1) );
+```
+
+`p->btreeMask` is a compact "which database b-trees this prepared statement may
+touch" mask. During prepare/code generation, SQLite marks the database slots the
+statement is expected to use. At runtime this assert checks that the opcode's
+`P1` database was already included in that mask.
+
+That matters because the VM does setup around the databases a statement may use:
+transaction setup, schema checks, locking/bookkeeping, and similar b-tree-level
+state. If code generation produced bytecode that touched an unmarked attached
+database, the runtime might not have done the required setup for it. This assert
+catches that as an internal compiler/code-generator bug.
+
+One related rowid detail: `BTREE_INTKEY` means the underlying table b-tree is
+keyed by a 64-bit integer rowid. A table can still use this layout even if its
+declared primary key is a UUID:
+
+```sql
+CREATE TABLE users(
+  id TEXT PRIMARY KEY,
+  name TEXT
+);
+```
+
+That ordinary rowid table still has a hidden integer `rowid`; the `TEXT PRIMARY
+KEY` is enforced with a separate unique index. Only an `INTEGER PRIMARY KEY`
+column aliases the rowid itself:
+
+```sql
+CREATE TABLE users(
+  id INTEGER PRIMARY KEY,
+  name TEXT
+);
+```
+
+And a `WITHOUT ROWID` table changes the storage shape so the primary key becomes
+the b-tree key:
+
+```sql
+CREATE TABLE users(
+  id TEXT PRIMARY KEY,
+  name TEXT
+) WITHOUT ROWID;
+```
+
+For that case, code generation patches the earlier `OP_CreateBtree` from
+`BTREE_INTKEY` to `BTREE_BLOBKEY`.
+
 Source:
 
 - `sqlite/src/vdbe.c:7032` implements `OP_CreateBtree`.
@@ -385,6 +456,16 @@ Source:
 - `sqlite/src/btree.c:10188` chooses table-page flags for `BTREE_INTKEY`.
 - `sqlite/src/btree.c:10193` calls `zeroPage()`.
 - `sqlite/src/btree.c:6514` implements `allocateBtreePage()`.
+- `sqlite/src/sqliteInt.h:3818` and `sqlite/src/sqliteInt.h:3825` define
+  `DbMaskTest()` for the two supported database-mask representations.
+- `sqlite/src/btree.h:115` explains `BTREE_INTKEY` versus `BTREE_BLOBKEY`.
+- `sqlite/src/sqliteInt.h:2496` defines `TF_WithoutRowid`.
+- `sqlite/src/sqliteInt.h:2551` defines `HasRowid()`.
+- `sqlite/src/build.c:1823` explains `Table.iPKey` for `INTEGER PRIMARY KEY`.
+- `sqlite/src/build.c:1826` notes that non-`INTEGER PRIMARY KEY` primary keys
+  get a unique index instead.
+- `sqlite/src/build.c:2338` documents the `WITHOUT ROWID` conversion from
+  `BTREE_INTKEY` to `BTREE_BLOBKEY`.
 
 ## allocateBtreePage()
 
