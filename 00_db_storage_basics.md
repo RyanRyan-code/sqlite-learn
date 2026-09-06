@@ -379,17 +379,129 @@ root
 
 Even a huge table might need only a few page reads to reach the right leaf.
 
-Important properties:
+Important b-tree invariants:
 
 ```text
 keys are kept sorted
 interior nodes route searches to child ranges
 leaf nodes contain the final entries
-the tree is kept balanced so paths are short
+all leaves are at the same depth
+pages are kept neither overfull nor wastefully empty
 ```
 
 This is different from a binary tree, where each node has one key and two
 children. A database b-tree node may have hundreds of keys and child pointers.
+
+That "hundreds" part matters. If each interior page can route to 200 child
+pages, then height grows slowly:
+
+```text
+height 1: about 200 leaves
+height 2: about 40,000 leaves
+height 3: about 8,000,000 leaves
+```
+
+So lookup cost is not "scan all rows". It is closer to:
+
+```text
+search root page
+search one interior page
+search one leaf page
+```
+
+The searches inside each page are over sorted cells. The tree search chooses a
+page; the page search chooses a cell.
+
+## What self-balancing means
+
+Self-balancing means writes repair the tree as part of the write operation.
+
+It does not mean SQLite constantly moves every page into a perfect layout. It
+means SQLite preserves the b-tree invariants after inserts and deletes:
+
+```text
+1. pages cannot stay overfull
+2. pages should not stay too empty
+3. every leaf remains the same distance from the root
+4. parent separator keys continue to describe child key ranges
+```
+
+This is different from an AVL or red-black tree. Those are binary trees, and
+they rebalance with rotations around individual nodes. SQLite's b-tree
+rebalances whole pages of cells.
+
+For an insert:
+
+```text
+1. Find the leaf page where the key belongs.
+2. Insert the new cell into that page's sorted cell order.
+3. If the page still fits, stop.
+4. If the page overflows, rebalance that page with nearby sibling pages.
+5. If a parent page must gain or change separator cells, update the parent.
+6. If the parent overflows too, repeat upward.
+7. If the root overflows, grow the tree by one level.
+```
+
+SQLite's implementation detail is neat: a page can temporarily contain
+"overflow cells" in `MemPage.apOvfl[]`. That means "this cell belongs on this
+page logically, but the page image does not have room for it yet." Then
+`balance()` repairs the physical page layout.
+
+For a delete:
+
+```text
+1. Remove the cell from the leaf page.
+2. Free overflow pages if the cell's payload used any.
+3. If the page is still dense enough, stop.
+4. If the page is too empty, redistribute cells with siblings or merge pages.
+5. If a parent separator changed or disappeared, update the parent.
+6. If the root becomes unnecessary, shrink the tree by one level.
+```
+
+The important thing is that balancing is page-local first. SQLite does not
+rebuild the whole tree after every write. It looks at the modified page, its
+parent, and a few siblings, then may propagate the repair upward only if the
+parent is affected.
+
+Conceptually:
+
+```text
+before insert:
+
+parent: [100 | 200]
+children:
+  A: keys <= 100
+  B: keys 101..200
+  C: keys > 200
+
+insert key 175 into B
+
+if B has room:
+  only B changes
+
+if B overflows:
+  SQLite redistributes/splits B with siblings
+  parent separator cells are adjusted
+```
+
+The "self" in self-balancing just means the b-tree code does this automatically
+during `INSERT`, `DELETE`, and related structural edits. The user does not run a
+separate repair step to keep lookups efficient.
+
+Source:
+
+- `sqlite/src/btree.c:9121` starts `balance()`, the central repair routine.
+- `sqlite/src/btree.c:9142` skips rebalancing when the page is not overfull and
+  still dense enough.
+- `sqlite/src/btree.c:9151` calls `balance_deeper()` when the root page is
+  overfull.
+- `sqlite/src/btree.c:9191` uses `balance_quick()` for the common rightmost
+  append case.
+- `sqlite/src/btree.c:9210` calls `balance_nonroot()` to redistribute cells
+  between a page and sibling pages.
+- `sqlite/src/btree.c:9660` calls `balance()` after insert creates overflow
+  cells.
+- `sqlite/src/btree.c:9985` describes delete-time tree balancing.
 
 ## SQLite b-trees
 
