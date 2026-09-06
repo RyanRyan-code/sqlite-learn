@@ -400,6 +400,18 @@ debug builds calls are real calls; in release builds calls become an empty
 statement after preprocessing.
 
 ```c
+Pgno pgno;
+pgno = 0;
+```
+
+`Pgno` means page number. SQLite database files are divided into numbered pages:
+page 1 holds the database header and the `sqlite_schema` root b-tree, and later
+pages hold table roots, index roots, overflow content, freelist pages, and so
+on. In this opcode, `pgno = 0` does not mean the new table's root page is page
+0. It only initializes the local output variable before the b-tree layer fills
+it in.
+
+```c
 rc = sqlite3BtreeCreateTable(pDb->pBt, &pgno, pOp->p3);
 if( rc ) goto abort_due_to_error;
 ```
@@ -407,6 +419,18 @@ if( rc ) goto abort_due_to_error;
 `rc` means return code. SQLite uses `SQLITE_OK` as success, which is zero, so
 `if( rc )` means "if the b-tree create call returned any error code, stop this
 VM program and go through the normal error path."
+
+Because `pgno` is passed by address, `sqlite3BtreeCreateTable()` writes the real
+new root page number into it. In a tiny empty database that might be page 2, but
+in a database with existing objects, freelist pages, or autovacuum metadata it
+can be some other page number. The later assignment:
+
+```c
+pOut->u.i = pgno;
+```
+
+copies that real root page number into the output register, where later schema
+update bytecode can store it in `sqlite_schema.rootpage`.
 
 ```c
 assert( pOp->p1>=0 && pOp->p1<db->nDb );
