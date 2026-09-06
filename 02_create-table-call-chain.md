@@ -162,6 +162,57 @@ Source:
 - `sqlite/src/vdbe.c:5757` reads `OP_Insert` data from `aMem[pOp->p2]`.
 - `sqlite/src/vdbe.c:5770` reads `OP_Insert` rowid/key from `aMem[pOp->p3]`.
 
+### Why numbered registers are not as risky as they look
+
+At first glance, `r[1]`, `r[2]`, and `r[3]` look like a fragile way to pass
+values around. It feels like normal C code manually sharing global variables:
+one opcode writes `r[2]`, another opcode later reads `r[2]`, and a mistake could
+overwrite something useful.
+
+The important distinction is that these registers are not global variables and
+not hardware CPU registers. They are per-statement VM slots:
+
+```text
+Vdbe *p
+  -> p->aMem[1]  == r[1]
+  -> p->aMem[2]  == r[2]
+  -> p->aMem[3]  == r[3]
+```
+
+Each prepared statement has its own `Vdbe` object and its own `aMem` array. So
+`r[2]` in one running statement is different storage from `r[2]` in another
+running statement.
+
+The register numbers are also not chosen casually during execution. They are
+assigned by SQLite's code generator during prepare. The code generator is
+responsible for knowing when a register value is still live and when the slot
+can be reused. In that sense, `r[2]` is closer to a compiler temporary than to a
+source-level variable.
+
+A friendlier high-level form might be:
+
+```text
+rootPage = CreateBtree(db=main, flags=BTREE_INTKEY)
+OpenWrite(cursor=1, root=rootPage)
+```
+
+But an efficient interpreter normally lowers that kind of symbolic value into a
+small numbered slot anyway. SQLite keeps the lowered form visible because the
+VDBE is a compact bytecode interpreter written in portable C.
+
+So the safety contract is:
+
+- `P1`, `P2`, and `P3` are fixed integer operands in the bytecode instruction.
+- `r[N]` is a runtime `Mem` slot inside the current `Vdbe`.
+- The SQL compiler/code generator owns register allocation and reuse.
+- If bytecode overwrites a live register, that is a code-generation bug, not
+  normal VM behavior.
+
+When `CreateBtree 0 2 1` runs, the VM does not pass a named `rootPage` variable.
+It resolves operand `P2 = 2` into `&p->aMem[2]`, then stores the new root page
+number there. Later opcodes use the same register number because the code
+generator deliberately emitted them that way.
+
 ## The bytecode spine
 
 From:
