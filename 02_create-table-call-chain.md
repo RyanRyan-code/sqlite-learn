@@ -392,6 +392,31 @@ sqlite3 *db
            -> Pager         page cache, journal/WAL, database file I/O
 ```
 
+`Btree` and `BtShared` are split because SQLite can share the same underlying
+database-file cache between multiple connections. Each connection gets its own
+`Btree` wrapper, but those wrappers can point at the same `BtShared`:
+
+```text
+connection A -> Btree A -> BtShared for main.db
+connection B -> Btree B -> same BtShared for main.db
+```
+
+`Btree` holds per-connection state such as the owning `sqlite3 *db`, this
+handle's transaction state, and shared-cache lock bookkeeping. `BtShared` holds
+the database-file state that can be shared: the `Pager`, page 1, page size,
+usable page size, page count, schema pointer, open cursor list, shared-cache
+locks, mutex, and auto-vacuum state.
+
+So when `btreeCreateTable()` begins with:
+
+```c
+BtShared *pBt = p->pBt;
+```
+
+it is moving from the current connection's `Btree` handle to the shared
+database-file storage state where page allocation and b-tree-page formatting
+actually happen.
+
 That one `Btree *` manager owns the shared page universe for the database file:
 page size, pager, freelist, transaction state, auto-vacuum metadata, mutexes,
 and page-cache access. Inside that page universe, there can be many separate
