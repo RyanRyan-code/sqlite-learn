@@ -54,6 +54,15 @@ Prepare-time builds the program. Step-time runs the program.
 
 `parse.y` is the human grammar. `parse.c` is the generated parser state machine. `parse.out` is the human-readable report that explains what the generated states mean.
 
+In this build, `parse.y` becomes 411 numbered grammar rules in `parse.out`. The report keeps the grammar shape but strips away semantic-value labels and C action code:
+
+```text
+parse.y:   oneselect(A) ::= SELECT distinct(D) ...
+parse.out: 92: oneselect ::= SELECT distinct ...
+```
+
+The rule numbers in `parse.out` are the same numbers you see in parser traces, like `reduce 92`.
+
 ## Tokenizer
 
 `sqlite3RunParser()` lives in:
