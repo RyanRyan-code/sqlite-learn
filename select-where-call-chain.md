@@ -279,52 +279,95 @@ the main parser state flow is:
 
 ```text
 state 0
-  SELECT -> shift 329
+  input SELECT
+  shift SELECT -> state 329
 
 state 329
-  ID(name) -> reduce empty distinct, empty sclp, empty scanpt
-  ID(name) -> shift 464
+  input ID(name)
+  reduce distinct ::= empty -> state 227
+  reduce sclp ::= empty -> state 422
+  reduce scanpt ::= empty -> state 91
+  shift ID(name) -> state 464
 
 state 464
-  FROM -> reduce expr ::= ID
-  expr -> shift 22
-  reduce selcollist
-  selcollist -> shift 328
-  FROM -> shift 226
+  input FROM
+  reduce expr ::= ID
+  shift expr -> state 22
+  reduce scanpt ::= empty -> state 291
+  reduce as ::= empty
+  reduce selcollist ::= sclp scanpt expr scanpt as
+  shift selcollist -> state 328
+  shift FROM -> state 226
 
 state 226
-  ID(users) -> reduce empty stl_prefix
-  ID(users) -> shift, pending reduce nm ::= ID
+  input ID(users)
+  reduce stl_prefix ::= empty -> state 235
+  shift ID(users), pending reduce nm ::= ID
 
-pending nm
-  WHERE -> reduce users into nm, then seltablist, then from
-  from -> shift 402
-  WHERE -> shift 113
+state 235 / pending reduce
+  input WHERE
+  reduce nm ::= ID
+  shift nm -> state 389
+  reduce dbnm ::= empty -> state 275
+  reduce as ::= empty -> state 208
+  reduce on_using ::= empty
+  reduce seltablist ::= stl_prefix nm dbnm as on_using
+  shift seltablist -> state 295
+  reduce from ::= FROM seltablist
+  shift from -> state 402
+  shift WHERE -> state 113
 
 state 113
-  ID(age) -> shift 464
+  input ID(age)
+  shift ID(age) -> state 464
 
 state 464
-  EQ -> reduce expr ::= ID
-  expr -> shift 77
-  EQ -> shift 139
+  input EQ
+  reduce expr ::= ID
+  shift expr -> state 77
+  shift EQ -> state 139
 
 state 139
-  INTEGER(30) -> shift, pending reduce term ::= INTEGER
+  input INTEGER(30)
+  shift INTEGER, pending reduce term ::= INTEGER
 
-pending term
-  SEMI -> reduce 30 into term, then expr
-  reduce age = 30 into expr
-  reduce WHERE expr into where_opt
-  where_opt -> shift 401
+pending reduce
+  input SEMI
+  reduce term ::= INTEGER
+  shift term -> state 153
+  reduce expr ::= expr EQ expr
+  shift expr -> state 77
+  reduce where_opt ::= WHERE expr
+  shift where_opt -> state 401
 
-finish SELECT
-  reduce empty groupby_opt, having_opt, orderby_opt, limit_opt
-  reduce full SELECT into oneselect
-  reduce oneselect into select
-  reduce select into cmd
-  reduce cmd into cmdx
-  SEMI -> finish
+state 401 onward
+  reduce groupby_opt ::= empty -> state 400
+  reduce having_opt ::= empty -> state 220
+  reduce orderby_opt ::= empty -> state 399
+  reduce limit_opt ::= empty
+  reduce oneselect ::= SELECT distinct selcollist from where_opt groupby_opt having_opt orderby_opt limit_opt
+  shift oneselect -> state 296
+  reduce select ::= selectnowith
+  reduce cmd ::= select
+  reduce cmdx ::= cmd
+  shift cmdx -> state 599
+  shift SEMI, then finish
+```
+
+Very compressed shape:
+
+```text
+0
+-> 329  after SELECT
+-> 464  after name
+-> 328/226 after select-list + FROM
+-> 235/389/275/208/295/402 after users becomes FROM source
+-> 113  after WHERE
+-> 464  after age
+-> 77/139 after age =
+-> 153/77/401 after 30 becomes age = 30 becomes where_opt
+-> 400/220/399 after empty GROUP/HAVING/ORDER/LIMIT
+-> 296 -> cmd -> cmdx -> 599 -> done
 ```
 
 The important build moments are:
