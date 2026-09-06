@@ -211,6 +211,15 @@ symbol + semantic value + state reached after that symbol
 
 Reductions do not consume the lookahead token. They only change the stack. A shift is what finally consumes the lookahead and pushes it onto the stack.
 
+A reduce does not simply throw away the matched pieces. It compresses them upward. The RHS entries are popped, the rule action builds or carries a higher-level semantic value, and the LHS symbol is pushed back onto the stack:
+
+```text
+ID("age") -> expr(age)
+expr(age) EQ expr(30) -> expr(age = 30)
+WHERE expr(age = 30) -> where_opt
+SELECT ... where_opt ... -> oneselect -> select -> cmd
+```
+
 To read a state in `parse.out`, look for the `*`:
 
 ```text
