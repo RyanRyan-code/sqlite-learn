@@ -360,6 +360,30 @@ child page number = 42
 When SQLite needs child page 42, the b-tree layer asks the pager for page 42.
 The pager maps that to a file offset and returns a cached memory page.
 
+The tree shape is page-to-page, not cell-to-cell:
+
+```text
+tree structure = pages linked by child page numbers
+ordering inside a page = cells sorted by key
+```
+
+So a b-tree is not:
+
+```text
+cell -> child cell -> child cell
+```
+
+It is:
+
+```text
+page
+  sorted cells
+  child page numbers for key ranges
+```
+
+Interior pages use their cells as separators. Leaf pages hold the actual table
+entries.
+
 There are two common b-tree styles:
 
 ```text
@@ -383,6 +407,76 @@ For a normal rowid table, `intKey` is true.
 Source:
 
 - `sqlite/src/btreeInt.h:275` documents `intKey`.
+
+## Interior vs leaf pages
+
+For a normal rowid table, the actual row payload lives in leaf pages.
+
+```text
+table leaf cell
+  payload size
+  rowid
+  record payload
+```
+
+Interior table pages are navigation pages. They do not contain SQL record
+payload. Each interior cell contains:
+
+```text
+4 bytes: left child page number
+varint:  separator rowid
+```
+
+The page header also has a separate right-most child page number.
+
+Conceptually:
+
+```text
+interior table page
+
+cell 0:
+  child page 12
+  separator rowid 100
+
+cell 1:
+  child page 18
+  separator rowid 250
+
+right-most child:
+  page 40
+```
+
+This means roughly:
+
+```text
+page 12 has rows <= 100
+page 18 has rows > 100 and <= 250
+page 40 has rows > 250
+```
+
+So the space in an interior table page is used by:
+
+```text
+page header
+cell pointer array
+small navigation cells
+free space / freeblocks / fragments
+```
+
+No table row data is stored there.
+
+Index b-trees are different: index keys are record-like payloads, so index
+interior pages can carry key payload. This section is about ordinary rowid table
+b-trees.
+
+Source:
+
+- `sqlite/src/btreeInt.h:134` describes the right child pointer.
+- `sqlite/src/btreeInt.h:189` shows the general cell format.
+- `sqlite/src/btreeInt.h:192` says the left child page number is omitted on leaf pages.
+- `sqlite/src/btree.c:1242` implements table-interior cell parsing.
+- `sqlite/src/btree.c:1253` reads child-page-plus-rowid separator size.
+- `sqlite/src/btree.c:1254` sets table-interior payload size to 0.
 
 ## Page layout
 
@@ -501,11 +595,99 @@ Conceptually:
 The sorted cell pointer array lets SQLite search by key without requiring the
 cell bodies themselves to be physically sorted.
 
+For a rowid table, the pointer array is sorted by rowid because rowid is the
+b-tree key. Keeping it sorted is cheaper than it first sounds because SQLite
+mostly moves 2-byte offsets, not whole row bodies.
+
+When inserting a cell into the middle of a page, SQLite:
+
+```text
+finds the correct cell index
+allocates space for the cell body somewhere in the cell content area
+shifts the 2-byte cell pointers with memmove()
+writes the new 2-byte offset into the pointer array
+```
+
+The relevant code is:
+
+```c
+pIns = pPage->aCellIdx + i*2;
+memmove(pIns+2, pIns, 2*(pPage->nCell - i));
+put2byte(pIns, idx);
+```
+
+So insertion inside one page is linear in the number of cells on that page, but
+the data being shifted is tiny. The b-tree keeps the number of page reads small
+by finding the target leaf in logarithmic page hops, then doing this local
+pointer-array edit.
+
 Source:
 
 - `sqlite/src/btreeInt.h:142` describes the cell pointer array.
 - `sqlite/src/btreeInt.h:149` says cell content grows from the end of the page.
 - `sqlite/src/btreeInt.h:165` says cells may not be contiguous or in order.
+- `sqlite/src/btree.c:7481` inserts into the cell pointer array.
+- `sqlite/src/btree.c:7482` shifts existing 2-byte cell pointers.
+
+## Delete and free space inside a page
+
+Deleting a row does not necessarily scrub the old cell bytes immediately. SQLite
+removes the cell pointer and marks the cell's old byte range as reusable free
+space.
+
+The local page operation is:
+
+```text
+dropCell(page, cell_index, cell_size)
+  -> find the cell's byte offset
+  -> freeSpace(page, offset, size)
+  -> remove the 2-byte pointer from the cell pointer array
+  -> decrement nCell
+```
+
+After deleting cell B:
+
+```text
+before:
+  cell pointer array: A, B, C
+  cell content area:  bytes for A, bytes for B, bytes for C
+
+after:
+  cell pointer array: A, C
+  cell content area:  bytes for A, freeblock where B was, bytes for C
+```
+
+If a new cell fits in that freeblock, SQLite can reuse it. If not, it may:
+
+```text
+use another freeblock
+use the unallocated gap between pointer array and cell content
+defragment the page to make contiguous space
+split or rebalance pages if the cell still will not fit
+```
+
+Freeblocks have their own tiny structure inside the page:
+
+```text
+2 bytes: offset of next freeblock
+2 bytes: size of this freeblock
+```
+
+Adjacent freeblocks are coalesced, so deleting nearby cells can create a larger
+usable region.
+
+Source:
+
+- `sqlite/src/btreeInt.h:152` describes freeblocks.
+- `sqlite/src/btreeInt.h:161` shows freeblock layout.
+- `sqlite/src/btree.c:1747` searches freeblocks for a slot.
+- `sqlite/src/btree.c:1819` allocates space for a new cell.
+- `sqlite/src/btree.c:1882` defragments if contiguous space is not available.
+- `sqlite/src/btree.c:1918` implements `freeSpace()`.
+- `sqlite/src/btree.c:1910` says adjacent freeblocks are coalesced.
+- `sqlite/src/btree.c:7267` implements `dropCell()`.
+- `sqlite/src/btree.c:7292` returns deleted cell bytes to page free space.
+- `sqlite/src/btree.c:7305` removes the 2-byte cell pointer.
 
 ## From page bytes to row values
 
