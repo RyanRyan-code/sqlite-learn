@@ -258,6 +258,78 @@ oneselect     -> select
 select        -> cmd
 ```
 
+## State Flow For This Query
+
+For:
+
+```sql
+SELECT name FROM users WHERE age = 30;
+```
+
+the main parser state flow is:
+
+```text
+state 0
+  SELECT -> shift 329
+
+state 329
+  ID(name) -> reduce empty distinct, empty sclp, empty scanpt
+  ID(name) -> shift 464
+
+state 464
+  FROM -> reduce expr ::= ID
+  expr -> shift 22
+  reduce selcollist
+  selcollist -> shift 328
+  FROM -> shift 226
+
+state 226
+  ID(users) -> reduce empty stl_prefix
+  ID(users) -> shift, pending reduce nm ::= ID
+
+pending nm
+  WHERE -> reduce users into nm, then seltablist, then from
+  from -> shift 402
+  WHERE -> shift 113
+
+state 113
+  ID(age) -> shift 464
+
+state 464
+  EQ -> reduce expr ::= ID
+  expr -> shift 77
+  EQ -> shift 139
+
+state 139
+  INTEGER(30) -> shift, pending reduce term ::= INTEGER
+
+pending term
+  SEMI -> reduce 30 into term, then expr
+  reduce age = 30 into expr
+  reduce WHERE expr into where_opt
+  where_opt -> shift 401
+
+finish SELECT
+  reduce empty groupby_opt, having_opt, orderby_opt, limit_opt
+  reduce full SELECT into oneselect
+  reduce oneselect into select
+  reduce select into cmd
+  reduce cmd into cmdx
+  SEMI -> finish
+```
+
+The important build moments are:
+
+```text
+name       -> expr -> selcollist
+users      -> nm -> seltablist -> from
+age        -> expr
+30         -> term -> expr
+age = 30   -> expr via sqlite3PExpr()
+WHERE expr -> where_opt
+SELECT ... -> oneselect via sqlite3SelectNew()
+```
+
 ## Building Expr Nodes
 
 `sqlite3PExpr()` builds an `Expr*`, not a `Select*`.
