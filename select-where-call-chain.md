@@ -187,6 +187,12 @@ Uppercase symbols are usually tokenizer tokens, like `SELECT` or `VALUES`. Lower
 
 If an action is not listed, the parser uses `{default}` if the state has one. If there is no listed action and no usable default, that table entry is an error/no-action.
 
+A key nuance: the parser never re-matches old input. The parser stack keeps the current state up to date. Every shift pushes a new state; every reduce pops the matched RHS states and pushes the LHS state. That means the next token only needs:
+
+```text
+current top state + incoming token -> next action
+```
+
 To read a state in `parse.out`, look for the `*`:
 
 ```text
