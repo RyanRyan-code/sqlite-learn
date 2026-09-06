@@ -165,6 +165,22 @@ struct MemPage {
 `MemPage.pgno` says which page this is. `MemPage.aData` points to the RAM copy
 of that page's bytes.
 
+`DbPage *pDbPage` is the b-tree layer's handle back to the pager-owned page
+object. In this part of SQLite, `DbPage` is effectively the same type as
+`PgHdr`:
+
+```c
+typedef struct PgHdr DbPage;
+```
+
+So `pDbPage` lets b-tree code ask the pager to do page-level work for this same
+page:
+
+```c
+sqlite3PagerWrite(pPage->pDbPage); /* make writable / journal if needed */
+sqlite3PagerUnref(pPage->pDbPage); /* release the page reference */
+```
+
 The same logical byte can be addressed two ways:
 
 ```text
@@ -191,6 +207,7 @@ Source:
 - `sqlite/src/btreeInt.h:273` defines `struct MemPage`.
 - `sqlite/src/btreeInt.h:295` has `u8 *aData`.
 - `sqlite/src/btreeInt.h:301` has `DbPage *pDbPage`.
+- `sqlite/src/pager.h:43` defines `DbPage` as an alias for `struct PgHdr`.
 
 ## Where page data lives in memory
 
