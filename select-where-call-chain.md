@@ -502,6 +502,21 @@ pSrc    = tables/sources after FROM
 pWhere  = WHERE expression tree
 ```
 
+After rule 92 reduces, the parser pushes:
+
+```text
+symbol: oneselect
+value:  Select*
+```
+
+Then more reductions carry that same `Select*` upward:
+
+```text
+oneselect -> selectnowith -> select -> cmd
+```
+
+At the `cmd ::= select` level, SQLite compiles the `Select*` into VDBE bytecode. The parser stack was only temporary working memory; the surviving output is the VDBE program attached to `Parse`.
+
 `Parse *pParse` is not the AST. It is the compiler context: database handle, current VDBE, errors, registers, cursors, name resolution state, and other compile-time state.
 
 ## Select To Bytecode
