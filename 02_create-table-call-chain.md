@@ -376,7 +376,69 @@ OP_CreateBtree
 The new page is not filled with rows. It is initialized as an empty leaf table
 b-tree page. The resulting root page number goes into `r[2]`.
 
-The implementation has a few compact checks that are worth unpacking:
+### Why there is no new `Btree *`
+
+`sqlite3BtreeCreateTable()` does not allocate a new C object for the table's
+b-tree. The existing `Btree *p` argument is the b-tree storage manager for one
+database file, not the table b-tree being created.
+
+The layers are roughly:
+
+```text
+sqlite3 *db
+  -> db->aDb[i]             one attached database slot, such as main/temp/aux
+     -> Btree *pBt          storage manager for that database file
+        -> BtShared         shared b-tree/pager/cache state
+           -> Pager         page cache, journal/WAL, database file I/O
+```
+
+That one `Btree *` manager owns the shared page universe for the database file:
+page size, pager, freelist, transaction state, auto-vacuum metadata, mutexes,
+and page-cache access. Inside that page universe, there can be many separate
+logical b-trees:
+
+```text
+page 1 -> sqlite_schema root b-tree
+page 2 -> users table root b-tree
+page 3 -> users_email index root b-tree
+page 4 -> orders table root b-tree
+page 5 -> child page of users
+page 6 -> overflow page
+```
+
+Those table and index b-trees are not child nodes of a larger manager b-tree.
+The manager is not a parent tree. It is the storage API for the database file.
+Each logical table/index b-tree is identified by a root page number stored in
+`sqlite_schema.rootpage`.
+
+This is why SQLite does not need an in-memory array of table b-tree objects.
+`sqlite_schema` is the durable catalog that maps each table or index name to
+the root page of its logical b-tree.
+
+So `btreeCreateTable()` creates the new logical b-tree by:
+
+```text
+allocate one database page
+format that page as an empty b-tree root page
+return its page number through piTable
+```
+
+The actual creation moment is `zeroPage(pRoot, ptfFlags)`: before that call,
+`pRoot` is just an allocated database page; after it, the page contains an empty
+b-tree page header and is the root of a new one-page logical b-tree. Later, when
+SQLite needs to read or write the table, it opens a `BtCursor` using:
+
+```text
+Btree manager + root page number
+```
+
+The cursor is the object that actively walks or edits one logical table/index
+b-tree.
+
+### Reading the opcode body
+
+The implementation is short, but each line is carrying part of the VM/storage
+contract:
 
 ```c
 sqlite3VdbeIncrWriteCounter(p, 0);
