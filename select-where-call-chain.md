@@ -509,6 +509,21 @@ symbol: oneselect
 value:  Select*
 ```
 
+In `parse.out`, this often appears as a fused Lemon action:
+
+```text
+limit_opt shift-reduce 92
+```
+
+That means:
+
+```text
+shift the completed limit_opt
+then immediately reduce rule 92 into oneselect
+```
+
+For the no-`LIMIT` query, `limit_opt` can first be created by an empty reduction while the lookahead token is still waiting. Then `limit_opt shift-reduce 92` finishes the `oneselect`.
+
 Then more reductions carry that same `Select*` upward:
 
 ```text
