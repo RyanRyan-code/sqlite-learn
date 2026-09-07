@@ -200,6 +200,100 @@ Source:
 - `sqlite/src/sqliteInt.h:540` defines release-build `NEVER(X)`.
 - `sqlite/src/sqliteInt.h:637` includes `<assert.h>`.
 
+## C memory ownership while reading SQLite
+
+SQLite is C code, not C++ code, so there is no language-level RAII inside the
+SQLite implementation. If SQLite allocates heap memory, SQLite code must arrange
+for the matching cleanup path.
+
+A local pointer variable and the heap block it points to have different
+lifetimes:
+
+```c
+void example(void){
+  int *p = malloc(100 * sizeof(int));
+}
+```
+
+When `example()` returns, the local variable `p` is gone. The heap allocation is
+not automatically freed. If nothing saved the pointer and no `free(p)` happens,
+the process has leaked that block until process exit.
+
+The mental split is:
+
+```text
+stack/local variable:
+  lifetime is tied to the function scope
+
+heap allocation:
+  lifetime is tied to an explicit free path or process exit
+```
+
+That matters when reading SQLite because many public APIs hide allocation behind
+opaque handles. Caller code often does not call `malloc()` directly:
+
+```c
+sqlite3_stmt *pStmt = 0;
+sqlite3_prepare_v2(db, zSql, -1, &pStmt, 0);
+sqlite3_step(pStmt);
+sqlite3_finalize(pStmt);
+```
+
+`sqlite3_prepare_v2()` takes a `sqlite3_stmt **` output parameter. Passing a
+pointer-to-pointer lets SQLite store the resulting handle in the caller's
+variable, but it does not remove the need for storage. The prepared statement
+object itself is created inside SQLite and must outlive the prepare call so the
+caller can later step it, reset it, bind values, read columns, and finalize it.
+
+The shape is:
+
+```text
+caller stack:
+  sqlite3_stmt *pStmt
+
+SQLite heap/internal allocation:
+  Vdbe object, exposed publicly as sqlite3_stmt
+
+ownership pair:
+  sqlite3_prepare_v2() creates/returns the handle
+  sqlite3_finalize() destroys it
+```
+
+So this is not garbage collection. It is disciplined ownership through API
+pairs. In C++ wrapper libraries, destructors often call these cleanup APIs
+automatically, which makes the calling code look RAII-style. The underlying
+SQLite C API is still explicit: finalize statements, close database handles, and
+free SQLite-owned returned buffers with the documented matching function.
+
+The rule of thumb is:
+
+```text
+fixed-size and short-lived:
+  stack storage plus output parameters can be enough
+
+variable-size or must outlive the function:
+  someone needs heap allocation, and someone needs the matching cleanup path
+```
+
+Source:
+
+- `sqlite/src/prepare.c:688` implements the internal `sqlite3Prepare()`.
+- `sqlite/src/prepare.c:695` receives `sqlite3_stmt **ppStmt` as an output
+  parameter.
+- `sqlite/src/prepare.c:941` implements `sqlite3_prepare_v2()`.
+- `sqlite/src/prepare.c:957` calls `sqlite3LockAndPrepare()` with `ppStmt`.
+- `sqlite/src/vdbeaux.c:11` says `Vdbe` is known externally as
+  `sqlite3_stmt`.
+- `sqlite/src/vdbeaux.c:25` implements `sqlite3VdbeCreate()`.
+- `sqlite/src/vdbeaux.c:28` allocates the `Vdbe` with
+  `sqlite3DbMallocRawNN()`.
+- `sqlite/src/vdbeapi.c:105` implements `sqlite3_finalize()`.
+- `sqlite/src/vdbeapi.c:119` calls `sqlite3VdbeDelete()`.
+- `sqlite/src/vdbeaux.c:3778` implements `sqlite3VdbeDelete()`.
+- `sqlite/src/vdbeaux.c:3790` frees the `Vdbe` with `sqlite3DbNNFreeNN()`.
+- `sqlite/src/sqlite.h.in:3251` documents `sqlite3_malloc()`.
+- `sqlite/src/sqlite.h.in:3262` documents `sqlite3_free()`.
+
 ## BtreeEnter, mutexes, and file locks
 
 `sqlite3BtreeEnter(Btree *p)` sounds like it might lock the database, but it
