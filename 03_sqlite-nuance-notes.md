@@ -457,6 +457,48 @@ EXCLUSIVE_LOCK
 depending on transaction state, rollback journal mode, WAL mode, and commit
 phase.
 
+### Why rollback-journal mode has more reader/writer blocking
+
+Rollback-journal mode writes changed pages back into the main database file.
+Before doing that safely, SQLite first saves the old page images in the
+rollback journal. The journal protects recovery, but the main database file is
+still the file readers are using.
+
+That is why rollback-journal mode needs stronger coordination at commit time:
+
+```text
+reader:
+  holds SHARED_LOCK to read a stable database image
+
+writer:
+  may hold RESERVED_LOCK while preparing changes
+  must prevent new readers with PENDING_LOCK near commit
+  must obtain EXCLUSIVE_LOCK before writing changed pages to the database file
+```
+
+The conflict is not "a writer exists", exactly. A writer can hold
+`RESERVED_LOCK` while existing and new readers still take `SHARED_LOCK`. The
+blocking happens when the writer needs to finish the transaction and update the
+main database file without readers observing a half-old, half-new image.
+
+WAL mode moves the dangerous overlap to a different shape. The writer appends
+new page versions to the WAL file instead of overwriting the database file
+during the transaction:
+
+```text
+reader:
+  keeps reading from its snapshot of the database plus WAL frames up to its
+  snapshot point
+
+writer:
+  appends newer frames to the WAL
+```
+
+So readers and one writer can overlap better in WAL mode. SQLite still allows
+only one writer at a time, and checkpoints still have their own coordination
+rules, but normal read/write concurrency is better because the writer is not
+forcing the main database image to change underneath active readers.
+
 ### Why BtreeEnter remains even though shared cache is discouraged
 
 Shared-cache mode is discouraged for most application use, but SQLite still
