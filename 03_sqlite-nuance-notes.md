@@ -121,6 +121,11 @@ run assert(0)
 then evaluate the whole expression as 0
 ```
 
+In an active assertion build, `assert(0)` normally prints an assertion failure
+and calls `abort()`, so the program stops there. The trailing `0` is not there
+because SQLite expects execution to continue after the failed assertion. It is
+there so the macro still has a valid expression value and type shape.
+
 So:
 
 ```c
