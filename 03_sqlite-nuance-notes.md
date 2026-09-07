@@ -524,6 +524,208 @@ Source:
 - `sqlite/src/os.h:83` explains database file lock levels.
 - `sqlite/src/pager.c:1157` calls `sqlite3OsLock()` for file locking.
 
+## Mutex mental model
+
+A mutex is not a database lock and not a file lock. It is a synchronization
+object used by threads to coordinate access to shared memory.
+
+The usual shape is:
+
+```c
+sqlite3_mutex_enter(mutex);
+
+/* critical section: read or mutate shared memory here */
+
+sqlite3_mutex_leave(mutex);
+```
+
+`enter` means "acquire the mutex" or "enter the critical section protected by
+this mutex". It does not mean entering, reading, or using the struct itself.
+
+Conceptually:
+
+```text
+sqlite3_mutex_enter(m)
+  if no thread owns m:
+    mark m as owned by this thread
+    continue
+  otherwise:
+    wait until the owner releases m
+
+sqlite3_mutex_leave(m)
+  release ownership of m
+  wake a waiting thread if needed
+```
+
+The important operation is atomic:
+
+```text
+check whether the mutex is free + claim it
+```
+
+Those two steps must happen as one indivisible operation. Otherwise two threads
+could both see "free" and both enter the protected code.
+
+### What a thread "holding" a mutex means
+
+A thread does not literally hold a struct. "Thread A holds mutex M" means:
+
+```text
+Thread A successfully acquired M and has not released it yet.
+```
+
+The mutex object is just memory plus OS/runtime bookkeeping. It does not
+automatically protect nearby variables or fields. The protection comes from a
+codebase convention:
+
+```text
+before touching this shared state, acquire this specific mutex
+```
+
+For example:
+
+```c
+sqlite3_mutex_enter(pBt->mutex);
+
+/* safe to touch selected BtShared fields here */
+
+sqlite3_mutex_leave(pBt->mutex);
+```
+
+This only works if all code that touches those selected `BtShared` fields follows
+the same rule.
+
+### SQLite's mutex abstraction
+
+SQLite wraps platform mutex APIs behind `sqlite3_mutex`.
+
+The public wrapper is:
+
+```c
+void sqlite3_mutex_enter(sqlite3_mutex *p){
+  if( p ){
+    sqlite3GlobalConfig.mutex.xMutexEnter(p);
+  }
+}
+```
+
+The configured mutex implementation is a table of function pointers:
+
+```c
+struct sqlite3_mutex_methods {
+  int (*xMutexInit)(void);
+  int (*xMutexEnd)(void);
+  sqlite3_mutex *(*xMutexAlloc)(int);
+  void (*xMutexFree)(sqlite3_mutex *);
+  void (*xMutexEnter)(sqlite3_mutex *);
+  int (*xMutexTry)(sqlite3_mutex *);
+  void (*xMutexLeave)(sqlite3_mutex *);
+  int (*xMutexHeld)(sqlite3_mutex *);
+  int (*xMutexNotheld)(sqlite3_mutex *);
+};
+```
+
+So on Unix/macOS the path is:
+
+```text
+sqlite3_mutex_enter(p)
+  -> sqlite3GlobalConfig.mutex.xMutexEnter(p)
+    -> pthreadMutexEnter(p)
+      -> pthread_mutex_lock(&p->mutex)
+```
+
+On Windows, the same SQLite call routes to the Windows mutex implementation. In
+single-thread/no-op builds, it can route to a no-op implementation.
+
+### pthreads
+
+`pthreads` means POSIX threads, the common C threading API on Unix-like systems
+such as Linux, macOS, and BSD.
+
+SQLite's Unix mutex implementation includes:
+
+```c
+#include <pthread.h>
+```
+
+The SQLite mutex object contains a pthread mutex:
+
+```c
+struct sqlite3_mutex {
+  pthread_mutex_t mutex;
+  ...
+};
+```
+
+The real lock/unlock calls are:
+
+```c
+pthread_mutex_lock(&p->mutex);
+pthread_mutex_unlock(&p->mutex);
+```
+
+`pthread_mutex_t` is opaque application-facing storage. User code should not
+inspect fields inside it. The pthread library and OS use that object, plus any
+needed platform/kernel state, to coordinate ownership and waiting.
+
+### Java comparison
+
+Java's:
+
+```java
+synchronized (obj) {
+  ...
+}
+```
+
+means:
+
+```text
+acquire the JVM monitor associated with obj
+run the block
+release the monitor
+```
+
+It does not automatically protect all fields inside `obj`. It just uses `obj` as
+the identity/key for a hidden JVM-managed lock.
+
+That is similar to:
+
+```c
+pthread_mutex_lock(&m);
+...
+pthread_mutex_unlock(&m);
+```
+
+Modern Java code often uses an explicit private lock object because it makes the
+intent clearer:
+
+```java
+private final Object lock = new Object();
+
+synchronized (lock) {
+  ...
+}
+```
+
+The same core rule applies in Java and C:
+
+```text
+the lock protects shared state only if all code uses the same lock before
+touching that state
+```
+
+Source:
+
+- `sqlite/src/mutex.c:322` implements the public `sqlite3_mutex_enter()`
+  wrapper.
+- `sqlite/src/mutex_unix.c:31` defines SQLite's Unix `sqlite3_mutex` wrapper
+  around `pthread_mutex_t`.
+- `sqlite/src/mutex_unix.c:270` calls `pthread_mutex_lock()`.
+- `sqlite/src/mutex_unix.c:360` calls `pthread_mutex_unlock()`.
+- `sqlite/src/mutex_unix.c:373` installs the pthread mutex method table.
+- `sqlite/src/sqlite.h.in:8525` defines `sqlite3_mutex_methods`.
+
 ### CREATE TABLE file-lock timing
 
 For `CREATE TABLE`, `btreeCreateTable()` is not the place that normally obtains
