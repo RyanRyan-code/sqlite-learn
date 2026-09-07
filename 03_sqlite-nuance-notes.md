@@ -199,3 +199,508 @@ Source:
 - `sqlite/src/sqliteInt.h:539` defines release-build `ALWAYS(X)`.
 - `sqlite/src/sqliteInt.h:540` defines release-build `NEVER(X)`.
 - `sqlite/src/sqliteInt.h:637` includes `<assert.h>`.
+
+## BtreeEnter, mutexes, and file locks
+
+`sqlite3BtreeEnter(Btree *p)` sounds like it might lock the database, but it
+does not. It enters a btree-layer critical section for a shared in-memory object.
+
+The implementation lives in `btmutex.c`:
+
+```c
+void sqlite3BtreeEnter(Btree *p){
+  ...
+  if( !p->sharable ) return;
+  p->wantToLock++;
+  if( p->locked ) return;
+  btreeLockCarefully(p);
+}
+```
+
+The actual mutex it enters is:
+
+```c
+p->pBt->mutex
+```
+
+where `p->pBt` is a `BtShared`.
+
+### Btree vs BtShared
+
+A database connection has a `Btree` handle for each attached database file:
+
+```text
+sqlite3 connection
+  -> Btree for main
+  -> Btree for temp
+  -> Btree for each ATTACHed database
+```
+
+The `Btree` object is per connection. It points at a `BtShared` object:
+
+```c
+struct Btree {
+  sqlite3 *db;
+  BtShared *pBt;
+  u8 sharable;
+  u8 locked;
+  int wantToLock;
+  ...
+};
+```
+
+`BtShared` contains the backend state that can be shared by multiple `Btree`
+handles in shared-cache mode:
+
+```c
+struct BtShared {
+  Pager *pPager;
+  sqlite3 *db;
+  BtCursor *pCursor;
+  MemPage *pPage1;
+  void *pSchema;
+  sqlite3_mutex *mutex;
+  ...
+};
+```
+
+The name `BtShared` means "the shareable part of a btree handle". It does not
+mean all connections to the same database file always share one `BtShared`.
+
+### Connections do not always share BtShared
+
+In normal private-cache use, two connections to the same database file usually
+look like this:
+
+```text
+conn1 -> Btree A -> BtShared A -> Pager A -> file.db
+conn2 -> Btree B -> BtShared B -> Pager B -> file.db
+```
+
+They do not share `BtShared`. They coordinate through pager/VFS file locks.
+
+In shared-cache mode, they can look like this:
+
+```text
+conn1 -> Btree A \
+                  -> BtShared X -> Pager X -> file.db
+conn2 -> Btree B /
+```
+
+That is when `BtShared.mutex` matters for cross-connection shared memory.
+
+`sqlite3BtreeOpen()` only searches for an existing `BtShared` when the open uses
+`SQLITE_OPEN_SHAREDCACHE`:
+
+```c
+if( vfsFlags & SQLITE_OPEN_SHAREDCACHE ){
+  p->sharable = 1;
+  ...
+  for(pBt=sqlite3SharedCacheList; pBt; pBt=pBt->pNext){
+    if( same filename and same VFS ){
+      p->pBt = pBt;
+      pBt->nRef++;
+      break;
+    }
+  }
+}
+```
+
+If no existing `BtShared` is reused, SQLite allocates a new one and opens a new
+pager:
+
+```c
+pBt = sqlite3MallocZero( sizeof(*pBt) );
+sqlite3PagerOpen(..., &pBt->pPager, ...);
+p->pBt = pBt;
+```
+
+### Mutex vs file lock
+
+A mutex and a database file lock are different tools.
+
+Mutex:
+
+```text
+Protects in-memory C data structures inside one process.
+Usually comes from a threading library or platform primitive.
+SQLite wraps it as sqlite3_mutex.
+```
+
+File lock:
+
+```text
+Protects the actual database file across connections and processes.
+Implemented through the pager and VFS.
+```
+
+SQLite mutex types are things like:
+
+```text
+SQLITE_MUTEX_FAST
+SQLITE_MUTEX_RECURSIVE
+SQLITE_MUTEX_STATIC_MAIN
+SQLITE_MUTEX_STATIC_OPEN
+```
+
+They are not the same as database file lock levels:
+
+```text
+NO_LOCK
+SHARED_LOCK
+RESERVED_LOCK
+PENDING_LOCK
+EXCLUSIVE_LOCK
+```
+
+So this:
+
+```c
+sqlite3_mutex_enter(pBt->mutex);
+```
+
+means:
+
+```text
+enter this in-memory critical section
+```
+
+It does not mean:
+
+```text
+take a SHARED/RESERVED/EXCLUSIVE database file lock
+```
+
+### What sqlite3BtreeEnter protects
+
+`sqlite3BtreeEnter(p)` protects shared btree-layer memory such as:
+
+```text
+BtShared.pCursor
+BtShared.pPage1
+BtShared.pSchema
+BtShared.inTransaction
+BtShared.pLock
+BtShared.pPager access from the btree layer
+```
+
+The mental model is:
+
+```text
+sqlite3BtreeEnter(p)
+  "I am about to read or mutate shared in-memory btree state."
+```
+
+It is not:
+
+```text
+sqlite3BtreeEnter(p)
+  "I am locking the database file."
+```
+
+### Where the file gets locked
+
+The database file is locked in the pager/VFS path.
+
+For example, the pager helper says:
+
+```c
+static int pagerLockDb(Pager *pPager, int eLock){
+  ...
+  rc = pPager->noLock ? SQLITE_OK : sqlite3OsLock(pPager->fd, eLock);
+  ...
+}
+```
+
+`eLock` is one of the database file lock levels:
+
+```text
+SHARED_LOCK
+RESERVED_LOCK
+EXCLUSIVE_LOCK
+```
+
+SQLite describes those levels like this:
+
+```text
+SHARED:
+  any number of processes may hold a SHARED lock simultaneously
+
+RESERVED:
+  a single process may hold a RESERVED lock; other processes may still hold
+  and obtain SHARED locks
+
+PENDING:
+  existing SHARED locks may persist, but no new SHARED locks may be obtained
+
+EXCLUSIVE:
+  excludes all other locks
+```
+
+So a read path can begin with:
+
+```text
+btree
+  -> sqlite3PagerSharedLock()
+    -> pager_wait_on_lock(..., SHARED_LOCK)
+      -> pagerLockDb(..., SHARED_LOCK)
+        -> sqlite3OsLock(..., SHARED_LOCK)
+```
+
+And a write path can later involve:
+
+```text
+RESERVED_LOCK
+EXCLUSIVE_LOCK
+```
+
+depending on transaction state, rollback journal mode, WAL mode, and commit
+phase.
+
+### Why BtreeEnter remains even though shared cache is discouraged
+
+Shared-cache mode is discouraged for most application use, but SQLite still
+supports it. The btree mutex code remains for that configuration.
+
+SQLite avoids the real mutex cost when shared cache is not used:
+
+```c
+if( !p->sharable ) return;
+```
+
+So in normal private-cache use:
+
+```text
+p->sharable == 0
+  -> sqlite3BtreeEnter(p) returns
+  -> no BtShared mutex is entered
+```
+
+If SQLite is compiled with shared-cache support omitted entirely, `btree.h`
+turns the enter/leave calls into macro no-ops:
+
+```c
+#define sqlite3BtreeEnter(X)
+#define sqlite3BtreeEnterAll(X)
+```
+
+The cost model is:
+
+```text
+SQLITE_OMIT_SHARED_CACHE:
+  sqlite3BtreeEnter() is compiled away
+
+shared-cache supported but not used:
+  small function call and branch, no real BtShared mutex lock
+
+shared-cache used:
+  actual BtShared mutex lock
+```
+
+In debug builds, SQLite may mark persistent btrees sharable even when the open
+did not request shared cache. That exercises the locking code and helps
+`assert(sqlite3_mutex_held(...))` catch mutex-discipline bugs.
+
+Source:
+
+- `sqlite/src/btmutex.c:1` says the file implements mutexes on `Btree` objects.
+- `sqlite/src/btmutex.c:20` enters `p->pBt->mutex` and sets `p->locked`.
+- `sqlite/src/btmutex.c:56` explains the recursive interface over a
+  non-recursive mutex.
+- `sqlite/src/btmutex.c:71` implements `sqlite3BtreeEnter()`.
+- `sqlite/src/btmutex.c:88` returns immediately when `p->sharable` is false.
+- `sqlite/src/btmutex.c:143` implements `sqlite3BtreeLeave()`.
+- `sqlite/src/btreeInt.h:345` defines `struct Btree`.
+- `sqlite/src/btreeInt.h:425` defines `struct BtShared`.
+- `sqlite/src/btree.c:2591` starts the shared-cache lookup path.
+- `sqlite/src/btree.c:2595` checks `SQLITE_OPEN_SHAREDCACHE`.
+- `sqlite/src/btree.c:2627` scans `sqlite3SharedCacheList`.
+- `sqlite/src/btree.c:2677` allocates a new `BtShared`.
+- `sqlite/src/btree.c:2682` opens a new pager.
+- `sqlite/src/btree.h:390` declares `sqlite3BtreeEnter()` when shared cache is
+  compiled in.
+- `sqlite/src/btree.h:396` makes `sqlite3BtreeEnter()` a no-op macro when
+  shared cache is omitted.
+- `sqlite/src/os.h:83` explains database file lock levels.
+- `sqlite/src/pager.c:1157` calls `sqlite3OsLock()` for file locking.
+
+### CREATE TABLE file-lock timing
+
+For `CREATE TABLE`, `btreeCreateTable()` is not the place that normally obtains
+the database file lock. It assumes a write transaction is already open.
+
+The useful call chain is:
+
+```text
+sqlite3_step()
+  -> sqlite3VdbeExec()
+    -> OP_Transaction
+       -> sqlite3BtreeBeginTrans(pBt, pOp->p2, &iMeta)
+          -> btreeBeginTrans(...)
+             -> sqlite3BtreeEnter(p)
+             -> lockBtree(pBt)
+                -> sqlite3PagerSharedLock(pPager)
+                   -> pager_wait_on_lock(..., SHARED_LOCK)
+                      -> pagerLockDb(..., SHARED_LOCK)
+                         -> sqlite3OsLock(fd, SHARED_LOCK)
+             -> sqlite3PagerBegin(pPager, exFlag, ...)
+                rollback-journal mode:
+                  -> pagerLockDb(..., RESERVED_LOCK)
+                     -> sqlite3OsLock(fd, RESERVED_LOCK)
+                WAL mode:
+                  -> sqlite3WalBeginWriteTransaction(...)
+    -> OP_CreateBtree
+       -> sqlite3BtreeCreateTable(...)
+          -> sqlite3BtreeEnter(p)
+          -> btreeCreateTable(...)
+             -> allocateBtreePage(...)
+             -> sqlite3PagerWrite(...)
+             -> zeroPage(...)
+          -> sqlite3BtreeLeave(p)
+```
+
+So the split is:
+
+```text
+OP_Transaction:
+  get permission to read/write the database
+
+OP_CreateBtree / btreeCreateTable:
+  allocate and initialize the new root page after permission exists
+```
+
+`OP_Transaction` calls:
+
+```c
+rc = sqlite3BtreeBeginTrans(pBt, pOp->p2, &iMeta);
+```
+
+For a write transaction, `btreeBeginTrans()` eventually calls:
+
+```c
+rc = sqlite3PagerBegin(pPager, wrflag>1, sqlite3TempInMemory(p->db));
+```
+
+In rollback-journal mode, `sqlite3PagerBegin()` obtains a writer-intent file
+lock:
+
+```c
+rc = pagerLockDb(pPager, RESERVED_LOCK);
+```
+
+If an exclusive transaction is requested, it may immediately upgrade:
+
+```c
+rc = pager_wait_on_lock(pPager, EXCLUSIVE_LOCK);
+```
+
+The final OS/VFS call is inside `pagerLockDb()`:
+
+```c
+rc = pPager->noLock ? SQLITE_OK : sqlite3OsLock(pPager->fd, eLock);
+```
+
+By the time `OP_CreateBtree` runs, `btreeCreateTable()` asserts that the btree is
+already in a write transaction:
+
+```c
+assert( pBt->inTransaction==TRANS_WRITE );
+```
+
+Then it allocates the new root page:
+
+```c
+rc = allocateBtreePage(pBt, &pRoot, &pgnoRoot, 1, 0);
+```
+
+or, in auto-vacuum mode, chooses a root-page number and may move an existing page
+to make room:
+
+```c
+rc = allocateBtreePage(pBt, &pPageMove, &pgnoMove, pgnoRoot, BTALLOC_EXACT);
+...
+rc = relocatePage(pBt, pRoot, eType, iPtrPage, pgnoMove, 0);
+```
+
+`allocateBtreePage()` marks page-allocation metadata writable. If it reuses a
+freelist page, it decrements the freelist count on page 1:
+
+```c
+rc = sqlite3PagerWrite(pPage1->pDbPage);
+put4byte(&pPage1->aData[36], n-1);
+```
+
+If it appends a new page to the database image, it also marks page 1 writable,
+increments `pBt->nPage`, and writes the database-size field:
+
+```c
+rc = sqlite3PagerWrite(pBt->pPage1->pDbPage);
+pBt->nPage++;
+put4byte(28 + (u8*)pBt->pPage1->aData, pBt->nPage);
+```
+
+Then it gets the new page and marks that page writable:
+
+```c
+rc = btreeGetUnusedPage(pBt, *pPgno, ppPage, bNoContent);
+rc = sqlite3PagerWrite((*ppPage)->pDbPage);
+```
+
+Back in `btreeCreateTable()`, the root page is initialized as a leaf table or
+index page:
+
+```c
+zeroPage(pRoot, ptfFlags);
+```
+
+The role of `sqlite3PagerWrite()` in this path is not mainly "take the file
+lock". The write transaction has already done that. Its role is:
+
+```text
+before modifying this page, make sure the pager has journaled/tracked enough
+state for rollback and commit
+```
+
+The mental model is:
+
+```text
+file lock:
+  obtained before btreeCreateTable(), during OP_Transaction
+
+page allocation:
+  done inside btreeCreateTable()
+
+page journaling / dirty tracking:
+  done by sqlite3PagerWrite() before page bytes are changed
+```
+
+Source:
+
+- `sqlite/src/vdbe.c:4107` implements `OP_Transaction`.
+- `sqlite/src/vdbe.c:4128` calls `sqlite3BtreeBeginTrans()`.
+- `sqlite/src/btree.c:3607` enters the btree mutex in `btreeBeginTrans()`.
+- `sqlite/src/btree.c:3660` comments that transactions imply a read-lock on
+  page 1.
+- `sqlite/src/btree.c:3717` calls `sqlite3PagerBegin()` for write transactions.
+- `sqlite/src/btree.c:3282` implements `lockBtree()`.
+- `sqlite/src/btree.c:3290` calls `sqlite3PagerSharedLock()`.
+- `sqlite/src/pager.c:5318` waits for `SHARED_LOCK`.
+- `sqlite/src/pager.c:5968` implements `sqlite3PagerBegin()`.
+- `sqlite/src/pager.c:6002` obtains `RESERVED_LOCK` in rollback-journal mode.
+- `sqlite/src/pager.c:6004` may wait for `EXCLUSIVE_LOCK`.
+- `sqlite/src/pager.c:1157` calls `sqlite3OsLock()`.
+- `sqlite/src/vdbe.c:7032` implements `OP_CreateBtree`.
+- `sqlite/src/vdbe.c:7045` calls `sqlite3BtreeCreateTable()`.
+- `sqlite/src/btree.c:10054` implements `btreeCreateTable()`.
+- `sqlite/src/btree.c:10063` asserts the write transaction is already active.
+- `sqlite/src/btree.c:10181` allocates the new root page in the non-auto-vacuum
+  path.
+- `sqlite/src/btree.c:10155` marks a moved auto-vacuum root page writable.
+- `sqlite/src/btree.c:10193` initializes the new root page with `zeroPage()`.
+- `sqlite/src/btree.c:10199` wraps `btreeCreateTable()` with
+  `sqlite3BtreeEnter()` / `sqlite3BtreeLeave()`.
+- `sqlite/src/btree.c:6514` implements `allocateBtreePage()`.
+- `sqlite/src/btree.c:6570` marks page 1 writable before freelist metadata
+  changes.
+- `sqlite/src/btree.c:6776` marks page 1 writable before appending a new page.
+- `sqlite/src/btree.c:6792` marks the allocated page writable.
