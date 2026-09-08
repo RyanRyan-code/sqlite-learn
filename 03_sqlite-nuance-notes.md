@@ -361,6 +361,56 @@ struct BtShared {
 The name `BtShared` means "the shareable part of a btree handle". It does not
 mean all connections to the same database file always share one `BtShared`.
 
+### Pointer fields that are really linked-list heads
+
+This SQLite field is a good C-language trap:
+
+```c
+BtCursor *pCursor;    /* A list of all open cursors */
+```
+
+The type only says "`pCursor` points to a `BtCursor`". C does not know whether
+that address is one object, the first element of an array, or the first node in
+a linked list. The surrounding code defines the convention.
+
+Here, `pCursor` is the head of a linked list. Each cursor contains another
+pointer field:
+
+```c
+struct BtCursor {
+  ...
+  BtCursor *pNext;    /* Forms a linked list of all cursors */
+  ...
+};
+```
+
+Code walks the list by following `pNext` until it reaches a null pointer:
+
+```c
+for(p=pBt->pCursor; p; p=p->pNext){
+  ...
+}
+```
+
+So the end marker is not hidden in the pointer type. It is the explicit
+`NULL`/`0` value stored in the final node's `pNext`.
+
+This is different from an actual fixed-size array declaration:
+
+```c
+BtCursor cursors[10];
+```
+
+and different from a function parameter written with array syntax:
+
+```c
+void f(BtCursor cursors[], size_t n);
+```
+
+In a function parameter, `BtCursor cursors[]` adjusts to `BtCursor *cursors`.
+The function still needs `n`, a sentinel, or some other convention to know how
+many elements are valid.
+
 ### Connections do not always share BtShared
 
 In normal private-cache use, two connections to the same database file usually
