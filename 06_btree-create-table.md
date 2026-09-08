@@ -324,6 +324,101 @@ pBt->autoVacuum == 1
 If autovacuum is off, pointer-map pages are not part of the database layout, and
 page 2 is just an ordinary allocatable database page.
 
+## Pending byte and pending-byte page
+
+`PENDING_BYTE` is not a page number. It is a byte offset in the database file's
+logical byte space:
+
+```c
+#define PENDING_BYTE  (0x40000000)
+#define RESERVED_BYTE (PENDING_BYTE+1)
+#define SHARED_FIRST  (PENDING_BYTE+2)
+#define SHARED_SIZE   510
+```
+
+By default:
+
+```text
+PENDING_BYTE = 0x40000000
+             = 1073741824
+             = first byte past the 1 GiB boundary
+```
+
+SQLite uses this region for file-lock coordination. The important part is that
+byte-range locks are logical locks on:
+
+```text
+file identity + byte-offset range
+```
+
+They are not locks on physical disk addresses. So these do not conflict:
+
+```text
+a.db at offset 0x40000000
+b.db at offset 0x40000000
+```
+
+Each file has its own logical offset space.
+
+The lock range can also be beyond end-of-file. If a database is only 40 KiB,
+SQLite can still ask the OS/VFS to lock byte offset `0x40000000` for that file.
+That does not extend the file, allocate the skipped bytes, or write anything at
+1 GiB. It only records a lock range associated with that file.
+
+This is different from writing at a future offset. Some filesystems support
+sparse files, where writing one byte far beyond EOF makes the logical file size
+large while the unwritten middle behaves like zeros. SQLite's pending-byte lock
+does not do that. Locking future bytes is not writing future bytes.
+
+`PENDING_BYTE_PAGE(pBt)` converts the pending-byte offset into the SQLite page
+number that would contain that byte:
+
+```c
+#define PENDING_BYTE_PAGE(pBt) \
+  ((Pgno)((PENDING_BYTE/((pBt)->pageSize))+1))
+```
+
+SQLite database pages are 1-indexed. With 4096-byte pages:
+
+```text
+PENDING_BYTE / pageSize = 1073741824 / 4096 = 262144
+PENDING_BYTE_PAGE       = 262145
+```
+
+So page `262145` is the page containing the pending byte.
+
+Why put the lock bytes so high instead of using a small offset? Because some
+locking systems, historically including Windows mandatory byte-range locks,
+cannot safely lock bytes that SQLite also needs to read/write as database
+content. If SQLite used byte 100, that byte would be inside page 1, and ordinary
+page-1 I/O would overlap the lock byte.
+
+SQLite chooses a high offset so small databases do not waste a real page:
+
+```text
+database smaller than 1 GiB:
+  pending byte is beyond EOF
+  SQLite may still lock that logical byte
+  no database page exists there yet
+  no file space is wasted
+
+database larger than 1 GiB:
+  pending byte falls inside the database's logical page range
+  SQLite reserves/skips that whole page
+  no b-tree, overflow, freelist, or pointer-map content goes there
+```
+
+So the compact model is:
+
+```text
+PENDING_BYTE
+  always a logical lock coordinate inside the database file
+
+PENDING_BYTE_PAGE
+  the page that would contain that coordinate
+  skipped only when the database grows far enough for that page to matter
+```
+
 In memory, SQLite handles pointer-map pages through the pager as `DbPage *` plus
 raw bytes:
 
