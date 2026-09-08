@@ -336,6 +336,68 @@ ignore them and write the file anyway. SQLite correctness depends on SQLite
 connections using the same protocol and on the filesystem implementing the lock
 operations correctly.
 
+SQLite uses OS locks on these byte positions, not reads and writes of the byte
+values themselves, because the OS lock operation is the concurrency primitive.
+The kernel/filesystem arbitrates whether the lock can be acquired atomically.
+
+If SQLite tried to use byte contents as homemade lock variables, two processes
+could race:
+
+```text
+process A reads "unlocked"
+process B reads "unlocked"
+process A writes "locked by A"
+process B writes "locked by B"
+```
+
+Both processes might think they own the lock. With OS byte-range locks, SQLite
+asks the OS:
+
+```text
+Can this process hold a read/write lock on this byte range right now?
+```
+
+The OS answers by succeeding, blocking, or failing with busy/lock error
+semantics according to existing lock holders. The bytes provide stable addresses
+for the lock calls; the OS-maintained lock table is the real state.
+
+Locking byte ranges instead of taking one whole-file lock also gives SQLite more
+than two states. A single whole-file read/write lock would mostly express:
+
+```text
+shared whole-file lock:
+  many readers
+
+exclusive whole-file lock:
+  one writer, no readers
+```
+
+The byte ranges let SQLite express the middle states that make rollback-journal
+mode less blunt:
+
+```text
+reader:
+  read-lock shared range
+
+writer preparing:
+  write-lock RESERVED_BYTE
+  compatible with existing and new readers
+
+writer committing:
+  write-lock PENDING_BYTE
+  blocks new readers, lets old readers drain
+
+writer writing database file:
+  write-lock shared range
+  waits until old readers are gone
+```
+
+So the performance/concurrency gain is not "SQLite protects fewer data bytes".
+The locked bytes are not data bytes. The gain is that SQLite gets a small set of
+lock registers with different compatibility rules, which lets a writer reserve
+and prepare work while readers keep going and keeps the exclusive phase closer
+to commit.
+
 SQLite's default rollback-lock byte layout is:
 
 ```text
