@@ -283,6 +283,203 @@ EXCLUSIVE:
 
 These are not mutex types. They are VFS/OS file locks.
 
+## What the file lock locks
+
+SQLite's lock names are higher-level protocol states. The operating system does
+not usually know about a "SQLite RESERVED lock" as a special object. SQLite maps
+those states onto ordinary file-locking primitives supplied by the VFS.
+
+The useful split is:
+
+```text
+OS/VFS provides:
+  read/shared locks
+  write/exclusive locks
+  byte ranges inside a file
+
+SQLite defines:
+  which byte or byte range means SHARED, RESERVED, PENDING, or EXCLUSIVE
+  which transitions are allowed
+  when readers are allowed to keep going
+  when new readers are blocked
+  when the writer may overwrite the database file
+```
+
+So it is still a file lock. The slightly surprising part is that Unix and
+Windows file-locking APIs can lock byte ranges inside a file, and SQLite uses a
+few byte ranges as coordination markers. The bytes are not rows, btree pages, or
+useful database content. They are agreed-upon lock coordinates.
+
+SQLite's default rollback-lock byte layout is:
+
+```text
+PENDING_BYTE:
+  first lock byte, normally just past the 1GB boundary
+
+RESERVED_BYTE:
+  PENDING_BYTE + 1
+
+SHARED_FIRST .. SHARED_FIRST + SHARED_SIZE - 1:
+  shared-lock range, 510 bytes by default
+```
+
+The simplified mapping is:
+
+```text
+SHARED_LOCK:
+  temporarily read-lock PENDING_BYTE
+  then read-lock the shared-lock range
+  then release PENDING_BYTE
+
+RESERVED_LOCK:
+  requires an existing SHARED_LOCK
+  write-lock RESERVED_BYTE
+
+PENDING_LOCK:
+  not requested directly by pager code
+  happens while trying to get EXCLUSIVE_LOCK
+  write-lock PENDING_BYTE
+  blocks new SHARED_LOCK attempts, but old readers may remain
+
+EXCLUSIVE_LOCK:
+  write-lock the whole shared-lock range
+  can succeed only after other shared/read locks are gone
+```
+
+This is why `SHARED_LOCK` is "shared": many readers can hold compatible
+read-locks on the database file's shared-lock range. It is not a row/page/table
+lock. Its practical meaning is:
+
+```text
+I am reading this database-file image.
+Do not let a writer overwrite the database file until readers release it.
+```
+
+A writer can still get `RESERVED_LOCK` while readers exist, because that uses a
+different lock byte. But before the writer writes changed pages back into the
+main database file in rollback-journal mode, it needs `EXCLUSIVE_LOCK`, which
+conflicts with readers' shared-range locks.
+
+The `PENDING_LOCK` step is the drain-the-readers step:
+
+```text
+writer has RESERVED_LOCK
+  -> wants EXCLUSIVE_LOCK
+  -> takes PENDING_BYTE as a write-lock
+  -> new SHARED_LOCK attempts fail
+  -> existing SHARED_LOCK holders finish naturally
+  -> writer retries and gets EXCLUSIVE_LOCK
+```
+
+## Why not row locks?
+
+It is tempting to think SQLite could avoid this by locking rows instead of the
+database file. But at the pager/VFS layer, rows are not the thing being changed.
+SQLite is coordinating safe access to database files, pages, journals, and WAL
+state.
+
+A single logical row update can touch more than one physical place:
+
+```text
+table btree page containing the row
+overflow pages for large records
+index btree pages for indexed columns
+page headers and cell pointer arrays
+parent/internal btree pages after page splits or merges
+freelist pages
+rollback journal or WAL records
+schema pages for DDL
+```
+
+Rows are also not stable byte ranges. A record can move because of inserts,
+deletes, vacuuming, page splits, defragmentation inside a page, or overflow-page
+changes. The operating system cannot know which bytes are "row 42" or which
+index entries and metadata belong to that row. It only knows files, offsets,
+lengths, and read/write locks.
+
+To make row locks work as a general concurrency feature, SQLite would need a
+much larger concurrency subsystem:
+
+```text
+lock manager
+shared lock table across connections/processes
+deadlock detection
+row/page/intention lock hierarchy
+predicate or range locks for index scans
+more complex visibility and recovery rules
+```
+
+That is the kind of machinery a server database can centralize. SQLite avoids a
+server process, so it uses the filesystem and VFS locks as the shared
+coordination point.
+
+The compact tradeoff:
+
+```text
+SQLite:
+  no server
+  one portable database file
+  many readers
+  one writer at a time
+  rollback-journal commits may need brief exclusive database-file access
+  WAL improves reader/writer overlap, but still keeps one writer
+
+PostgreSQL:
+  server process
+  shared memory and lock tables
+  MVCC and WAL managed by the server
+  row-level locks for normal row updates
+  many concurrent writers when they do not conflict
+```
+
+Postgres also has table locks, internal page latches, predicate locks in some
+isolation modes, and advisory locks. But as a mental model:
+
+```text
+SQLite coordinates writes at the database-file level.
+Postgres can coordinate ordinary row changes at the row level.
+```
+
+## WAL comparison with Postgres
+
+In terms of reader/writer blocking, SQLite WAL mode is closer to Postgres than
+SQLite rollback-journal mode is.
+
+The rough shape:
+
+```text
+SQLite rollback journal:
+  writer eventually overwrites the main database file
+  readers need a stable main database file
+  writer may need to wait for readers before commit can write the db file
+
+SQLite WAL:
+  writer appends changes to the WAL file
+  readers keep their snapshot using the database file plus WAL state
+  commit usually does not force existing readers out
+  writers are still serialized
+
+Postgres:
+  writer appends WAL records for recovery
+  writer also changes shared-buffer pages and later data files
+  readers use MVCC snapshots to decide which tuple versions are visible
+  ordinary readers usually do not block writers
+  many writers can run unless they conflict on rows or higher-level objects
+```
+
+So the useful lesson is:
+
+```text
+WAL helps avoid "writer must rewrite the main file while readers are using it."
+MVCC is what lets Postgres make reader/writer overlap the normal case.
+```
+
+SQLite WAL has better reader/writer overlap than rollback-journal mode, but it
+does not turn SQLite into a many-writer row-locking system. It still relies on
+embedded-file coordination and a single writer at a time. Postgres can afford a
+more detailed lock model because the server owns shared memory, lock tables,
+deadlock detection, snapshots, and recovery.
+
 ## Questions to trace next
 
 - How does explicit `BEGIN` differ from the implicit transaction around one
@@ -306,3 +503,8 @@ Source starting points:
 - `sqlite/src/pager.c:5968` implements `sqlite3PagerBegin()`.
 - `sqlite/src/pager.c:1157` calls `sqlite3OsLock()` through `pagerLockDb()`.
 - `sqlite/src/os.h:83` documents VFS file lock levels.
+- `sqlite/src/os.h:112` documents the lock-byte/range layout.
+- `sqlite/src/os.h:160` defines `PENDING_BYTE`, `RESERVED_BYTE`,
+  `SHARED_FIRST`, and `SHARED_SIZE`.
+- `sqlite/src/os_unix.c:1846` describes allowed lock transitions.
+- `sqlite/src/os_unix.c:1866` implements `unixLock()`.
