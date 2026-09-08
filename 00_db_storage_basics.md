@@ -49,9 +49,32 @@ desktop apps:
 Electron / Node apps:
   local app-data directory plus a native SQLite binding
 
+React Native apps:
+  not automatically SQLite just because the app is native
+  storage depends on the library chosen
+  modern @react-native-async-storage/async-storage uses SQLite on iOS,
+  Android, and macOS, while Web uses IndexedDB
+
 Python:
   built-in sqlite3 module opens a database file directly
 ```
+
+That React Native example is useful because the JavaScript API can hide the
+database completely. Application code may call a key-value API:
+
+```js
+await AsyncStorage.setItem("userToken", token);
+const token = await AsyncStorage.getItem("userToken");
+```
+
+Underneath, the storage library may persist those keys and values in a SQLite
+database file inside the app's private data directory. In that setup, SQLite is
+an implementation detail behind the local persistence API.
+
+Historical nuance: older React Native core `AsyncStorage` used different
+backends. Old docs described iOS as serialized dictionary/separate-file storage
+and Android as RocksDB or SQLite depending on availability. The modern community
+package documents SQLite for iOS and Android.
 
 The common pattern is not:
 
@@ -70,6 +93,11 @@ durable SQL file format with ACID transactions, no separate server, and very few
 deployment requirements. Its weak spot is many concurrent writers; its strength
 is reliable local structured storage almost anywhere a program can read and
 write files.
+
+Source:
+
+- `https://github.com/react-native-async-storage/async-storage` documents the
+  modern AsyncStorage platform backends.
 
 ## File vs disk
 
