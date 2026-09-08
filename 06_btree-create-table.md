@@ -242,6 +242,88 @@ PTRMAP_BTREE
   the page is a non-root b-tree page; parent points to its parent b-tree page
 ```
 
+Pointer-map pages are not discovered from a separate table. SQLite computes
+their page numbers from the target page number and the database's usable page
+size:
+
+```c
+static Pgno ptrmapPageno(BtShared *pBt, Pgno pgno){
+  int nPagesPerMapPage;
+  Pgno iPtrMap, ret;
+  assert( sqlite3_mutex_held(pBt->mutex) );
+  if( pgno<2 ) return 0;
+  nPagesPerMapPage = (pBt->usableSize/5)+1;
+  iPtrMap = (pgno-2)/nPagesPerMapPage;
+  ret = (iPtrMap*nPagesPerMapPage) + 2;
+  if( ret==PENDING_BYTE_PAGE(pBt) ){
+    ret++;
+  }
+  return ret;
+}
+```
+
+`usableSize` is the number of bytes SQLite can use on each page:
+
+```text
+usableSize = pageSize - reservedBytes
+```
+
+`pageSize` is not always 4096. SQLite supports different database page sizes,
+commonly from 512 to 65536 bytes, and the chosen value is part of the database
+file format. It can be influenced with:
+
+```sql
+PRAGMA page_size;
+PRAGMA page_size = 4096;
+```
+
+The page can also reserve bytes at the end for extension/encryption-style use
+cases. Pointer-map entries must fit in the usable part of the page, so the
+formula uses `pBt->usableSize`, not the raw page size.
+
+Since each pointer-map entry is 5 bytes, a pointer-map page can describe roughly
+`usableSize/5` database pages. The `+1` accounts for the pointer-map page itself:
+
+```c
+nPagesPerMapPage = (pBt->usableSize/5)+1;
+```
+
+For a database with 4096 usable bytes:
+
+```text
+4096 / 5 = 819 entries
+nPagesPerMapPage = 820
+```
+
+So pointer-map pages would be placed at:
+
+```text
+page 2
+page 822
+page 1642
+...
+```
+
+Each pointer-map page describes the ordinary pages after it:
+
+```text
+page 2    describes pages 3..821
+page 822  describes pages 823..1641
+page 1642 describes pages 1643..2461
+```
+
+Page 2 is not always a pointer-map page. It is the first pointer-map page only
+when this database is autovacuum-capable:
+
+```text
+compiled with autovacuum support
+  and
+pBt->autoVacuum == 1
+```
+
+If autovacuum is off, pointer-map pages are not part of the database layout, and
+page 2 is just an ordinary allocatable database page.
+
 In memory, SQLite handles pointer-map pages through the pager as `DbPage *` plus
 raw bytes:
 
