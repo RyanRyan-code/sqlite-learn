@@ -14,6 +14,63 @@ SQL tables
 
 SQLite mostly thinks in **page numbers**, not disk addresses and not C pointers.
 
+## SQLite as an embedded database
+
+SQLite is not a toy database and it is not a server process. It is an embedded C
+library that an application links into its own process.
+
+The basic shape is:
+
+```text
+application code
+  -> calls SQLite library
+    -> opens a local .db/.sqlite file
+      -> runs SQL
+        -> SQLite reads and writes ordinary files through the VFS/OS
+```
+
+That is why SQLite is widely used in places where the database belongs to one
+application, device, user profile, or local workspace:
+
+```text
+mobile apps:
+  app sandbox file such as Notes.db or Cache.db
+  iOS can use SQLite directly or through Core Data
+  Android can use SQLite directly or through Room
+
+browsers:
+  profile databases for history, cookies, downloads, permissions, autofill,
+  site-storage metadata, and internal indexes
+
+desktop apps:
+  preferences, recent files, search indexes, message history, sync queues,
+  cache metadata, and offline documents
+
+Electron / Node apps:
+  local app-data directory plus a native SQLite binding
+
+Python:
+  built-in sqlite3 module opens a database file directly
+```
+
+The common pattern is not:
+
+```text
+app -> network -> database server
+```
+
+It is:
+
+```text
+app -> in-process SQLite library -> local database file
+```
+
+This makes SQLite feel small, but the smallness is the point. It provides a
+durable SQL file format with ACID transactions, no separate server, and very few
+deployment requirements. Its weak spot is many concurrent writers; its strength
+is reliable local structured storage almost anywhere a program can read and
+write files.
+
 ## File vs disk
 
 To a program, a file looks like one ordered byte stream:
