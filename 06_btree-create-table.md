@@ -427,6 +427,34 @@ DbPage *pDbPage;  /* The pointer map page */
 u8 *pPtrmap;      /* The pointer map data */
 ```
 
+At this layer, a page is a cached page, not necessarily a `MemPage`.
+
+The database file is split into fixed-size pages:
+
+```text
+page 1
+page 2
+page 3
+...
+```
+
+When SQLite needs a page, the pager/page-cache layer keeps an in-memory copy of
+that file page. That in-memory copy is the cached page.
+
+```text
+database file page
+  bytes in the .db file
+
+cached page
+  in-memory copy of one database file page
+  managed by pager/page-cache
+  represented by DbPage / PgHdr
+```
+
+`MemPage` is one layer above that. It is the b-tree layer's interpretation of a
+cached page, and only applies when the cached page is being used as a b-tree
+page.
+
 `DbPage` is a typedef for the pager/cache page header:
 
 ```c
@@ -438,10 +466,22 @@ And `PgHdr` contains:
 ```c
 struct PgHdr {
   sqlite3_pcache_page *pPage;
-  void *pData;
-  void *pExtra;
+  void *pData;   /* Page data */
+  void *pExtra;  /* Extra content */
   ...
 };
+```
+
+`pData` and `pExtra` are different memory regions:
+
+```text
+PgHdr.pData
+  actual database page bytes
+  read from / written to the database file
+
+PgHdr.pExtra
+  extra in-memory metadata storage attached to the cached page
+  not part of the database file
 ```
 
 Then:
@@ -477,13 +517,36 @@ This is different from a normal table/index b-tree page:
 normal b-tree page:
   DbPage from pager
   + PgHdr.pData raw b-tree page bytes
-  + PgHdr.pExtra initialized as a MemPage wrapper
+  + PgHdr.pExtra initialized as a MemPage wrapper/metadata object
 
 pointer-map page:
   DbPage from pager
   + PgHdr.pData raw pointer-map entries
   + PgHdr.pExtra must not be initialized as a b-tree MemPage
 ```
+
+For a normal b-tree page, the `MemPage` object lives in `PgHdr.pExtra`, but its
+`aData` field points back to `PgHdr.pData`:
+
+```c
+MemPage *pPage = (MemPage*)sqlite3PagerGetExtra(pDbPage);
+pPage->aData = sqlite3PagerGetData(pDbPage);
+```
+
+So this is the shape:
+
+```text
+DbPage / PgHdr
+  pData
+    -> raw page bytes
+
+  pExtra
+    -> MemPage struct
+       -> aData points to pData
+```
+
+`MemPage` is not a second copy or alternate byte representation of the page
+content. It is the b-tree layer's parsed/cached wrapper around the raw bytes.
 
 `ptrmapPut()` checks for this corruption case:
 
