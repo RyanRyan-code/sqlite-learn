@@ -158,6 +158,37 @@ read/write N bytes at logical file offset X
 SQLite does not need to know where those bytes physically live on the SSD or
 disk.
 
+When SQLite asks for bytes at a file offset, it is not moving a pointer through
+physical disk addresses. It is asking the OS/VFS to fill a memory buffer from a
+logical file range:
+
+```text
+SQLite asks:
+  read 4096 bytes at logical file offset 167936
+
+filesystem does:
+  logical file range -> physical block lookup -> device reads
+
+SQLite receives:
+  one contiguous 4096-byte buffer in RAM
+```
+
+That RAM buffer is where pointer arithmetic becomes valid. The database file may
+be fragmented physically, but the page image in memory is consecutive bytes:
+
+```text
+RAM page buffer:
+  aData[0]
+  aData[1]
+  aData[2]
+  ...
+  aData[4095]
+```
+
+So SQLite's durable identity for a page is the page number. The temporary,
+in-process way to inspect that page is a pointer to the page's RAM buffer plus
+offsets inside the buffer.
+
 ## Pages
 
 SQLite divides a database file into fixed-size pages:
