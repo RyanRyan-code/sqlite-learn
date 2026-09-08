@@ -977,6 +977,37 @@ OP_CreateBtree / btreeCreateTable:
   allocate and initialize the new root page after permission exists
 ```
 
+There are two different lock lifetimes in that call chain:
+
+```text
+BtShared mutex:
+  sqlite3BtreeEnter(p)
+  protects in-memory btree state for this btree-layer call
+  released by sqlite3BtreeLeave(p) before returning to the VDBE opcode loop
+
+pager/file transaction state:
+  sqlite3PagerSharedLock(...)
+  sqlite3PagerBegin(...)
+  SHARED_LOCK / RESERVED_LOCK / WAL write-lock state
+  remains part of the active transaction until commit, rollback, or cleanup
+```
+
+So `OP_Transaction` can briefly enter the `BtShared` mutex and then leave it
+while still leaving the database transaction open. Later, `OP_CreateBtree` enters
+the `BtShared` mutex again because the earlier mutex critical section has ended.
+The transaction-level pager/file permission is still active; the in-memory
+btree mutex is not.
+
+The mental model is:
+
+```text
+sqlite3BtreeEnter():
+  short-lived mutex around shared in-memory btree structs
+
+sqlite3PagerBegin():
+  transaction-duration pager/file or WAL permission
+```
+
 `OP_Transaction` calls:
 
 ```c
