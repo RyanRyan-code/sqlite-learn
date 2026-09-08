@@ -702,6 +702,74 @@ check whether the mutex is free + claim it
 Those two steps must happen as one indivisible operation. Otherwise two threads
 could both see "free" and both enter the protected code.
 
+### How mutex waiting works
+
+`sqlite3_mutex_enter()` does not mean SQLite runs a manual busy loop like this:
+
+```c
+while( mutex_is_locked ){
+  /* keep checking */
+}
+```
+
+SQLite delegates the real wait to the configured mutex implementation. On the
+Unix implementation used on Linux/macOS, that eventually reaches:
+
+```c
+pthread_mutex_lock(&p->mutex);
+```
+
+The usual implementation shape is:
+
+```text
+fast path:
+  try to claim the lock with an atomic operation in user space
+  if it succeeds, enter the critical section without a syscall
+
+slow path:
+  if another thread owns the mutex, ask the OS/threading runtime to block this
+  thread
+  the waiting thread is descheduled and does not consume CPU polling the mutex
+
+unlock path:
+  release the lock
+  if there are waiters, wake one or more blocked threads through the runtime/OS
+```
+
+On Linux, pthread mutexes are commonly implemented with futexes: the uncontended
+path is a user-space atomic operation, and the contended path can park the
+thread in a kernel wait queue until another thread wakes it. That futex detail is
+below SQLite; SQLite just calls the pthread API.
+
+There can still be loops inside a real mutex implementation, but the important
+distinction is where the time is spent:
+
+```text
+spinning:
+  repeatedly check the lock while still running on CPU
+
+blocking:
+  sleep in the OS/runtime and retry only after being woken
+```
+
+General-purpose mutexes normally avoid burning CPU for long waits. Some
+implementations spin briefly before sleeping, and explicit spinlocks are a
+different primitive intended for very short critical sections.
+
+A blocked mutex waiter is also not a Java-style listener object. A listener is
+usually just an object in memory whose method is called directly when some other
+code decides to notify it:
+
+```java
+for (Listener l : listeners) {
+  l.onChange(newState);
+}
+```
+
+That loop is ordinary application dispatch. The listener is not necessarily a
+parked thread. A blocked mutex waiter is a thread that tried to acquire a lock
+and could not continue until the runtime/OS makes it runnable again.
+
 ### What a thread "holding" a mutex means
 
 A thread does not literally hold a struct. "Thread A holds mutex M" means:
@@ -853,6 +921,8 @@ touching that state
 
 Source:
 
+- `sqlite/src/mutex.c:319` says `sqlite3_mutex_enter()` blocks until the mutex
+  can be obtained.
 - `sqlite/src/mutex.c:322` implements the public `sqlite3_mutex_enter()`
   wrapper.
 - `sqlite/src/mutex_unix.c:31` defines SQLite's Unix `sqlite3_mutex` wrapper
