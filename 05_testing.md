@@ -72,8 +72,20 @@ it.
 
 Most SQLite Tcl tests run under `testfixture`, not plain `sqlite3`.
 
-`testfixture` is a custom Tcl shell linked with SQLite and SQLite's test-only C
-helpers. It knows commands like:
+`testfixture` is not the normal SQLite CLI. It is closer to a per-test runner
+executable:
+
+```text
+testfixture = Tcl interpreter + SQLite C code + SQLite test-only helper commands
+```
+
+The normal shell is:
+
+```text
+sqlite3 = interactive SQL command-line shell for users
+```
+
+`testfixture` knows commands like:
 
 ```tcl
 sqlite3 db test.db
@@ -92,6 +104,21 @@ In this checkout, the useful build directory is:
 ```text
 /Users/albertw/Documents/source_code_libs/sqlite-debug
 ```
+
+The runner layers are:
+
+```text
+./testfixture ../sqlite/test/btree01.test
+  -> runs one Tcl test script in one process
+
+../sqlite/test/testrunner.tcl btree%
+  -> schedules many .test files
+  -> uses testfixture workers
+  -> records status in testrunner.log / testrunner.db
+```
+
+So `testfixture` is the actual process that runs a test and contains SQLite's C
+code. `testrunner.tcl` is the higher-level batch orchestrator.
 
 ## `TCL_CONFIG_SH` on macOS
 
@@ -249,6 +276,193 @@ Rerun failed or incomplete tests from the last run:
 
 ```sh
 ../sqlite/test/testrunner.tcl retest
+```
+
+## Which database a test uses
+
+Most tests use a Tcl command named `db` connected to:
+
+```text
+./test.db
+```
+
+But `tester.tcl` first changes into a test working directory. By default that
+directory is:
+
+```text
+testdir
+```
+
+So when running from:
+
+```text
+/Users/albertw/Documents/source_code_libs/sqlite-debug
+```
+
+the default database file is usually:
+
+```text
+/Users/albertw/Documents/source_code_libs/sqlite-debug/testdir/test.db
+```
+
+The setup path is:
+
+```tcl
+proc reset_db {} {
+  catch {db close}
+  forcedelete test.db
+  forcedelete test.db-journal
+  forcedelete test.db-wal
+  sqlite3 db ./test.db
+  set ::DB [sqlite3_connection_pointer db]
+}
+reset_db
+```
+
+So conceptually:
+
+```text
+Tcl command `db`
+  -> sqlite3 connection handle
+     -> main database file `testdir/test.db`
+```
+
+Some tests override this. Common variants are:
+
+```tcl
+sqlite3 db :memory:
+sqlite3 db {}
+sqlite3 db2 test2.db
+ATTACH 'test.db2' AS aux;
+```
+
+## Does the database reset after each test?
+
+Not after each individual `do_test`.
+
+The default lifecycle is:
+
+```text
+one .test file starts
+  -> source tester.tcl
+  -> reset_db
+  -> run many do_test / do_execsql_test cases
+  -> state persists between those cases
+  -> finish_test
+```
+
+Tests inside a single file often intentionally build on earlier state.
+
+Some test files manually reset mid-file with helpers such as:
+
+```tcl
+reset_db
+db_delete_and_reopen
+forcedelete test.db
+sqlite3 db test.db
+sqlite3 db :memory:
+```
+
+When `testrunner.tcl` runs many files, each file generally gets its own fresh
+`test.db` setup through the harness.
+
+## Debug a Tcl test with LLDB
+
+Attach LLDB to the `testfixture` process, not to `test.db`.
+
+`test.db` is only the database file on disk. The SQLite C code is running inside
+the `testfixture` process.
+
+For a good LLDB experience, compile `testfixture` with debug symbols. This
+debug build already does that:
+
+```text
+cc -g -DSQLITE_DEBUG=1 -O0 ...
+```
+
+The useful pieces are:
+
+```text
+-g                  emit debug symbols for LLDB
+-O0                 avoid optimization that makes stepping confusing
+-DSQLITE_DEBUG=1    enable SQLite debug assertions and debug-only code paths
+```
+
+The Tcl `.test` files are not compiled. The compiled thing is `testfixture`,
+which links together:
+
+```text
+SQLite core C code
+SQLite test helper C files: src/test*.c
+Tcl interpreter support
+```
+
+Run a test directly under LLDB:
+
+```sh
+cd /Users/albertw/Documents/source_code_libs/sqlite-debug
+lldb -- ./testfixture ../sqlite/test/btree01.test
+```
+
+Inside LLDB:
+
+```lldb
+breakpoint set --name btreeCreateTable
+run
+```
+
+Or break on the public wrapper:
+
+```lldb
+breakpoint set --name sqlite3BtreeCreateTable
+run
+```
+
+If the test is already running, attach to the process:
+
+```sh
+pgrep testfixture
+lldb -p PID
+```
+
+A useful pattern is to start the test with `--pause`:
+
+```sh
+./testfixture ../sqlite/test/btree01.test --pause
+```
+
+The harness waits before beginning the test, giving time to attach from another
+terminal:
+
+```sh
+pgrep testfixture
+lldb -p PID
+```
+
+The mental model:
+
+```text
+LLDB attaches to testfixture process
+  -> testfixture opens testdir/test.db
+  -> Tcl test executes SQL using SQLite's C API
+  -> SQLite C code runs inside testfixture
+  -> btreeCreateTable() mutates pages in test.db
+```
+
+For example:
+
+```text
+btree01.test
+  -> do_execsql_test
+     -> execsql
+        -> Tcl sqlite3 binding
+           -> sqlite3_prepare_v2()
+           -> sqlite3_step()
+           -> sqlite3_finalize()
+              -> parser / code generator / VDBE
+                 -> OP_CreateBtree
+                    -> sqlite3BtreeCreateTable()
+                       -> btreeCreateTable()
 ```
 
 ## Is there a unit test for `btreeCreateTable()`?
@@ -420,6 +634,11 @@ tests prove behavior through stable public or semi-public paths.
   commands.
 - `sqlite/doc/testrunner.md:222` shows direct single-file execution with
   `./testfixture`.
+- `sqlite/test/tester.tcl:391` sets the default test working directory to
+  `testdir`.
+- `sqlite/test/tester.tcl:500` creates and changes into that test directory.
+- `sqlite/test/tester.tcl:551` implements `reset_db`.
+- `sqlite/test/tester.tcl:562` calls `reset_db` when the harness loads.
 - `sqlite/main.mk:1799` builds `testfixture`.
 - `sqlite/main.mk:1836` defines the `testrunner` target.
 - `sqlite/src/btree.c:10054` implements `btreeCreateTable()`.
