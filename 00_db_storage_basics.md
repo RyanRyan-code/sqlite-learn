@@ -114,6 +114,41 @@ But that does not mean the file is physically stored as one consecutive chunk on
 disk. The operating system and filesystem map logical file offsets to physical
 storage blocks.
 
+The filesystem keeps metadata that answers questions like:
+
+```text
+file bytes 0..4095      -> physical block 120
+file bytes 4096..8191   -> physical block 88412
+file bytes 8192..12287  -> physical block 121
+```
+
+To the application, those bytes still look contiguous:
+
+```text
+myfile.db byte 0
+myfile.db byte 1
+myfile.db byte 2
+...
+```
+
+The scattered physical layout is hidden behind the filesystem's lookup tables.
+Older or simpler filesystems may store block lists and indirect blocks. Modern
+filesystems often store **extents**, which are compact records like "this file
+owns 500 consecutive blocks starting at block 90000". Large filesystems usually
+index this metadata with tree-like structures so they can find the physical
+blocks for a file offset quickly.
+
+The filesystem also tracks free space with structures such as bitmaps or
+allocation trees. When a file grows, it tries to allocate nearby free blocks. If
+nearby space is unavailable, the new part of the file may be placed somewhere
+else, and the file's metadata is updated to point to that new location. That is
+fragmentation.
+
+Fragmentation hurts spinning disks most because the drive head has to seek
+between far-apart regions. It usually matters less on SSDs because there is no
+moving head, though extra metadata lookups and random I/O can still have some
+cost.
+
 So SQLite relies on this OS contract:
 
 ```text
