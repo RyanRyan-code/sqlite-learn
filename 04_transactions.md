@@ -310,6 +310,32 @@ Windows file-locking APIs can lock byte ranges inside a file, and SQLite uses a
 few byte ranges as coordination markers. The bytes are not rows, btree pages, or
 useful database content. They are agreed-upon lock coordinates.
 
+Another way to say it: SQLite treats these byte positions like a tiny
+cross-process lock register bank attached to the database file. The contents of
+the bytes are not the signal. The lock state on those byte positions is the
+signal.
+
+When saying "SQLite locks the database file", be precise:
+
+```text
+What the OS sees:
+  this process has a read/write lock on this byte range of this file
+
+What SQLite means:
+  this connection is in SHARED/RESERVED/PENDING/EXCLUSIVE state for the
+  database file
+```
+
+So the OS may only be locking one designated byte or a 510-byte shared-lock
+range, not every byte of the `.db` file. Because every SQLite connection follows
+the same lock protocol, those tiny byte-range locks coordinate access to the
+whole database file.
+
+On Unix, these locks are usually advisory. A non-cooperating program could
+ignore them and write the file anyway. SQLite correctness depends on SQLite
+connections using the same protocol and on the filesystem implementing the lock
+operations correctly.
+
 SQLite's default rollback-lock byte layout is:
 
 ```text
