@@ -130,6 +130,23 @@ allocate any page, but prefer one near page 1 if there is a choice
 
 That makes sense for new root-ish pages in non-autovacuum databases.
 
+For normal non-root pages, `nearby` is usually a related page number:
+
+```text
+overflow page
+  -> prefer a page near the previous overflow page
+
+page split
+  -> prefer a page near the page being split
+```
+
+This is only a locality hint. Nearby page numbers mean nearby offsets inside the
+database file, not guaranteed nearby physical disk sectors. The benefit is
+practical and probabilistic: the operating system, filesystem, SQLite page
+cache, and storage device may handle nearby file offsets with better readahead
+and cache behavior. This especially helps overflow chains and range scans across
+neighboring b-tree leaf pages.
+
 With `BTALLOC_EXACT`, `nearby` becomes the target page number:
 
 ```c
