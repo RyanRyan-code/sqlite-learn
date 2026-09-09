@@ -83,6 +83,70 @@ sqlite3PagerWrite() has already been called
 
 So the caller can modify it without first asking the pager to make it writable.
 
+## Local variables
+
+At the start of the function:
+
+```c
+MemPage *pPage1;
+int rc;
+u32 n;     /* Number of pages on the freelist */
+u32 k;     /* Number of leaves on the trunk of the freelist */
+MemPage *pTrunk = 0;
+MemPage *pPrevTrunk = 0;
+Pgno mxPage;     /* Total size of the database file */
+```
+
+`pPage1` is a local pointer to page 1:
+
+```c
+pPage1 = pBt->pPage1;
+```
+
+Page 1 contains database-header fields, including the first freelist trunk page
+and the total freelist page count.
+
+`rc` is the usual SQLite return-code variable. The function stores errors there
+and returns early when something fails.
+
+`n` is the total number of pages on the freelist. It is read from page 1 offset
+36:
+
+```c
+n = get4byte(&pPage1->aData[36]);
+```
+
+`k` is the number of freelist leaf page numbers stored on the current freelist
+trunk page:
+
+```text
+trunk page
+  offset 0  -> next trunk page
+  offset 4  -> k, number of leaf pointers
+  offset 8  -> first leaf page number
+  offset 12 -> second leaf page number
+```
+
+`pTrunk` points to the current freelist trunk page being inspected.
+`pPrevTrunk` points to the previous trunk page, which matters if SQLite removes
+a trunk from the middle of the freelist and has to relink the chain.
+
+```text
+pPrevTrunk        pTrunk
+    |               |
+    v               v
+ trunk 20  -----> trunk 35 -----> trunk 50
+```
+
+`mxPage` is the current database size in pages:
+
+```c
+mxPage = btreePagecount(pBt);
+```
+
+SQLite uses it for corruption checks, for example to reject freelist page
+numbers that are beyond the end of the database.
+
 ## Allocation modes
 
 At the top of `btree.c`:
