@@ -33,6 +33,46 @@ The outputs are:
 *pPgno   -> page number of that page
 ```
 
+## Why `MemPage **ppPage`?
+
+C passes arguments by value, including pointer arguments.
+
+With `MemPage *pPage`, the callee receives a copy of the caller's pointer. It
+can modify the shared page object through `pPage->...`, but this assignment only
+changes the callee's local pointer variable:
+
+```c
+pPage = newlyAllocatedPage;  /* caller's pointer is unchanged */
+```
+
+`allocateBtreePage()` needs to choose a page and store that chosen `MemPage *`
+back into the caller's pointer variable. So the caller passes the address of its
+pointer:
+
+```c
+MemPage *pRoot = 0;
+Pgno pgnoRoot = 0;
+
+rc = allocateBtreePage(pBt, &pRoot, &pgnoRoot, 1, BTALLOC_ANY);
+```
+
+Inside the function, `ppPage` points at the caller's `pRoot` slot:
+
+```text
+before:
+  caller pRoot = 0
+  ppPage -------> caller's pRoot variable
+
+assignment:
+  *ppPage = selectedPage
+
+after:
+  caller pRoot -> selectedPage
+```
+
+Same idea for `pPgno`: `*pPgno = iTrunk` writes the chosen page number back into
+the caller's `Pgno` variable.
+
 The caller owns the returned page reference and must later unref/release it.
 
 The returned page is already dirty:
