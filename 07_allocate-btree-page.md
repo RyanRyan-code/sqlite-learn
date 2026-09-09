@@ -145,6 +145,41 @@ n = get4byte(&pPage1->aData[36]);
 Read the freelist page count from page 1. In SQLite's file format, page 1 offset
 36 stores the total number of pages on the freelist.
 
+`get4byte()` reads a 4-byte big-endian integer from the raw page bytes.
+Big-endian means the most significant byte comes first.
+
+For example, the 4-byte value:
+
+```text
+0x12345678
+```
+
+is stored big-endian as:
+
+```text
+offset +0: 0x12
+offset +1: 0x34
+offset +2: 0x56
+offset +3: 0x78
+```
+
+So if `pPage1->aData[36..39]` contains:
+
+```text
+00 00 00 05
+```
+
+then:
+
+```c
+get4byte(&pPage1->aData[36])
+```
+
+returns `5`.
+
+SQLite uses a fixed byte order in its database file format so the same database
+file can be read consistently on machines with different CPU byte orders.
+
 ```c
 if( n>=mxPage ){
   return SQLITE_CORRUPT_BKPT;
