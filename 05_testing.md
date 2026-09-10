@@ -624,6 +624,38 @@ Possible approaches:
 SQLite usually prefers the last option. Internal functions remain private, and
 tests prove behavior through stable public or semi-public paths.
 
+## `testcase()`
+
+`testcase()` is SQLite coverage instrumentation. In a debug or coverage build,
+it expands roughly to:
+
+```c
+if( X ){
+  sqlite3CoverageCounter += __LINE__;
+}
+```
+
+So a line like:
+
+```c
+testcase( n==mxPage-1 );
+```
+
+creates a real branch for coverage tools to observe. It does not guarantee a
+test exists. It makes the edge condition visible, so coverage can report whether
+the test suite reached both sides of that condition.
+
+For example, a nearby corruption check might only branch on:
+
+```text
+n>=mxPage
+n<mxPage
+```
+
+But `testcase(n==mxPage-1)` marks the largest valid value as its own boundary
+case. That helps SQLite notice whether tests reached the edge just before the
+corrupt case.
+
 ## Source references
 
 - `sqlite/doc/testrunner.md:33` describes `testrunner.tcl`.
