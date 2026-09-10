@@ -393,6 +393,12 @@ cannot safely lock bytes that SQLite also needs to read/write as database
 content. If SQLite used byte 100, that byte would be inside page 1, and ordinary
 page-1 I/O would overlap the lock byte.
 
+The issue is not that page 1 has no spare-looking bytes. Page 1 cannot be
+skipped: it contains the database header and the start of the `sqlite_schema`
+btree page. SQLite also reads and writes database content in whole pages, not as
+"page 1 except these locking bytes." So the lock-byte region has to live outside
+normal database pages.
+
 SQLite chooses a high offset so small databases do not waste a real page:
 
 ```text
