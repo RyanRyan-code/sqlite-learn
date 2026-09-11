@@ -266,6 +266,49 @@ n = get4byte(&pPage1->aData[36]);
 Read the freelist page count from page 1. In SQLite's file format, page 1 offset
 36 stores the total number of pages on the freelist.
 
+`pPage1->aData` is a pointer to page 1's bytes in memory. The pager has already
+made the database page available as a contiguous memory view, so ordinary array
+indexing can access each byte:
+
+```text
+pPage1->aData       address of page 1's first byte in memory
+aData[36]           byte at offset 36 in that memory buffer
+&aData[36]          address of that byte
+get4byte(...)       read bytes 36, 37, 38, and 39
+```
+
+The address passed to `get4byte()` is therefore a memory address, not a disk
+address. Conceptually, the pager provides this mapping:
+
+```text
+logical database file             page 1 memory view
+
+file offset 0    ----------------> aData[0]
+file offset 1    ----------------> aData[1]
+...
+file offset 36   ----------------> aData[36]
+file offset 37   ----------------> aData[37]
+file offset 38   ----------------> aData[38]
+file offset 39   ----------------> aData[39]
+```
+
+The bytes are consecutive in SQLite's logical database file even if the
+filesystem stores the underlying blocks in different physical locations. The
+filesystem hides that physical layout, and SQLite asks for data using logical
+file offsets. The pager then presents the requested page through contiguous
+virtual memory, either from its page cache or through an equivalent mapped
+view.
+
+SQLite page numbers start at 1. In general, byte offset `x` within page `N`
+corresponds to this logical file position:
+
+```text
+file offset = (N - 1) * page_size + x
+```
+
+Because page 1 starts at file offset 0, `pPage1->aData[36]` corresponds directly
+to logical database-file offset 36.
+
 `get4byte()` reads a 4-byte big-endian integer from the raw page bytes.
 Big-endian means the most significant byte comes first.
 
