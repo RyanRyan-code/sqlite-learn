@@ -301,6 +301,19 @@ returns `5`.
 SQLite uses a fixed byte order in its database file format so the same database
 file can be read consistently on machines with different CPU byte orders.
 
+Separately, SQLite's C code may define `SQLITE_BYTEORDER` at build time:
+
+```c
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__
+# define SQLITE_BYTEORDER 1234
+#endif
+```
+
+Macros like `__BYTE_ORDER__` are usually predefined by the compiler. The CPU or
+target architecture determines the endian convention; the compiler reports that
+target information through macros; SQLite reads those macros during
+preprocessing. No runtime CPU check is needed for this path.
+
 ```c
 if( n>=mxPage ){
   return SQLITE_CORRUPT_BKPT;
