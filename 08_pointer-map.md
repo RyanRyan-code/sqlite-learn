@@ -282,6 +282,19 @@ Step by step:
 7. Reject type values outside 1..5 as corruption.
 ```
 
+### `0` as a null pointer
+
+In C, `0` used as a pointer means a null pointer. SQLite commonly uses `0`
+where other code uses `NULL`, so these are equivalent here:
+
+```c
+assert( pEType!=0 );
+assert( pEType!=NULL );
+```
+
+The assertion checks that `pEType` is an address, not that `*pEType` already
+contains a nonzero value.
+
 ### Why is `pPgno` optional?
 
 Only the output pointer is optional. The four bytes still exist in every
@@ -293,6 +306,9 @@ A caller that only needs to test the page type can pass `0`:
 u8 eType;
 rc = ptrmapGet(pBt, nearby, &eType, 0);
 ```
+
+The final `0` is a null pointer for `pPgno`, meaning that the caller does not
+want the parent-page output.
 
 For example, `allocateBtreePage()` uses this to ask whether an exact target is
 free:
