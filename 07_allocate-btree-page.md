@@ -342,6 +342,67 @@ memory order matches written numeric order. SQLite's file format chooses one
 fixed order; `SQLITE_BYTEORDER` describes the CPU's native order so SQLite knows
 when it can read directly and when it must swap bytes.
 
+The implementation of `sqlite3Get4byte()` uses that information to choose a
+fast path when possible:
+
+```c
+u32 sqlite3Get4byte(const u8 *p){
+#if SQLITE_BYTEORDER==4321
+  u32 x;
+  memcpy(&x,p,4);
+  return x;
+#elif SQLITE_BYTEORDER==1234 && GCC_VERSION>=4003000
+  u32 x;
+  memcpy(&x,p,4);
+  return __builtin_bswap32(x);
+#elif SQLITE_BYTEORDER==1234 && MSVC_VERSION>=1300
+  u32 x;
+  memcpy(&x,p,4);
+  return _byteswap_ulong(x);
+#else
+  testcase( p[0]&0x80 );
+  return ((unsigned)p[0]<<24) | (p[1]<<16) | (p[2]<<8) | p[3];
+#endif
+}
+```
+
+The branches mean:
+
+```text
+known big-endian
+  copy the four file bytes directly into the u32
+
+known little-endian with a supported compiler builtin
+  copy the bytes, then reverse them with one byte-swap operation
+
+anything else
+  construct the numeric value explicitly from four separate byte values
+```
+
+The final branch does not assume that the CPU is big-endian. For input bytes
+`12 34 56 78`, each array access first reads a one-byte number, which has no
+endianness:
+
+```text
+p[0] = 0x12  ->  p[0] << 24 = 0x12000000
+p[1] = 0x34  ->  p[1] << 16 = 0x00340000
+p[2] = 0x56  ->  p[2] <<  8 = 0x00005600
+p[3] = 0x78                  = 0x00000078
+                                      OR
+                              0x12345678
+```
+
+Shifts and bitwise OR operate on numeric values, so this produces the same
+`u32` value on either endian architecture. If that `u32` is later stored in
+memory, a little-endian CPU will lay out its bytes as `78 56 34 12`, but its
+numeric value remains `0x12345678`.
+
+Therefore, the direct `memcpy()` branch and the shift expression are equivalent
+on a big-endian CPU. On a little-endian CPU, direct `memcpy()` alone would yield
+the wrong numeric value, so SQLite either swaps the copied value or uses the
+portable shift expression. The cast to `unsigned` before shifting `p[0]` also
+makes a high top byte, such as `0x80`, safe to shift into the highest eight bits.
+
 Byte-swapping and copying are different operations. A compiler builtin such as
 `__builtin_bswap32(x)` reverses the byte order of a 32-bit value:
 
