@@ -314,6 +314,66 @@ target architecture determines the endian convention; the compiler reports that
 target information through macros; SQLite reads those macros during
 preprocessing. No runtime CPU check is needed for this path.
 
+The `1234` value means little-endian, and `4321` means big-endian. This is about
+how a multi-byte value is laid out in memory, not how the number exists inside a
+CPU register:
+
+```text
+number:          0x12345678
+big-endian:      12 34 56 78
+little-endian:   78 56 34 12
+```
+
+Little-endian feels backwards because humans write the most significant part
+first. The practical convenience is that the lowest-address byte is also the
+least significant byte:
+
+```text
+memory at p:  78 56 34 12
+
+32-bit value at p -> 0x12345678
+16-bit value at p -> 0x5678
+ 8-bit value at p -> 0x78
+```
+
+That can be convenient for sub-word access and arithmetic, where carries start
+from the least significant side. Big-endian has the human-friendly property that
+memory order matches written numeric order. SQLite's file format chooses one
+fixed order; `SQLITE_BYTEORDER` describes the CPU's native order so SQLite knows
+when it can read directly and when it must swap bytes.
+
+Byte-swapping and copying are different operations. A compiler builtin such as
+`__builtin_bswap32(x)` reverses the byte order of a 32-bit value:
+
+```text
+0x12345678 -> 0x78563412
+```
+
+That is useful for endian conversion. `memcpy()` does not do that. It copies raw
+bytes in the same order:
+
+```text
+source:       12 34 56 78
+destination:  12 34 56 78
+```
+
+SQLite has a test-only `SQLITE_INLINE_MEMCPY` option that replaces `memcpy()`
+with a simple byte-at-a-time loop:
+
+```c
+int xxn = N;
+while( xxn-- > 0 ){
+  *(xxd++) = *(xxs++);
+}
+```
+
+That loop is slow because it copies one byte per iteration. Its purpose is
+profiling, not production speed. Normal `memcpy()` may be a compiler builtin or
+a highly optimized libc routine, so Cachegrind may attribute the work to
+compiler/libc internals. The inline macro makes the copy cost appear at the
+SQLite source line that called `memcpy()`, which helps measure where SQLite is
+doing copies.
+
 ```c
 if( n>=mxPage ){
   return SQLITE_CORRUPT_BKPT;
