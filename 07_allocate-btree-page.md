@@ -252,6 +252,156 @@ nonzero `nearby`, and, unless autovacuum code is omitted, with autovacuum active
 That matches the main reason for exact/less-than allocation: page relocation in
 autovacuum mode.
 
+Reading the `||` explicitly makes the mode requirements easier to see:
+
+```text
+eMode == BTALLOC_ANY
+    OR
+(nearby > 0 AND pBt->autoVacuum)
+```
+
+In a build that includes autovacuum support, this gives:
+
+| Allocation mode | Required value of `pBt->autoVacuum` | Other requirement |
+| --- | --- | --- |
+| `BTALLOC_ANY` | Either true or false | None from this assertion |
+| `BTALLOC_EXACT` | True | `nearby > 0` |
+| `BTALLOC_LE` | True | `nearby > 0` |
+
+For `BTALLOC_ANY`, the left side of `||` is true, so C short-circuits and the
+right side does not impose any requirement. For either constrained mode, the
+left side is false, so the entire right side must be true:
+
+```text
+BTALLOC_EXACT or BTALLOC_LE
+  -> nearby > 0
+  -> pBt->autoVacuum == true
+```
+
+Thus, it is not only `BTALLOC_EXACT` that requires autovacuum. `BTALLOC_LE`
+also requires it because it chooses an earlier free destination for a page move;
+after the move, autovacuum can truncate the old page at the end of the file.
+Some source comments use the older name `BTALLOC_LT`; the constant in this
+checkout is `BTALLOC_LE`, meaning less than or equal to `nearby`.
+
+### Compile-time support versus runtime mode
+
+These two checks answer different questions:
+
+```c
+#ifndef SQLITE_OMIT_AUTOVACUUM
+```
+
+asks whether this SQLite binary was compiled with autovacuum support. In
+contrast:
+
+```c
+assert( pBt->autoVacuum );
+```
+
+asks whether the particular database currently being accessed is an
+autovacuum database. One SQLite binary can support autovacuum while opening
+both kinds of database:
+
+```text
+SQLite build includes autovacuum support
+  database A: pBt->autoVacuum = 1
+  database B: pBt->autoVacuum = 0
+```
+
+When `pBt->autoVacuum` is true, the database contains pointer-map pages. A
+useful way to remember the relationship is:
+
+```text
+autovacuum may move pages
+  -> moving a page requires finding who points to it
+  -> pointer-map pages provide that reverse lookup
+```
+
+Ordinary b-tree links mainly give SQLite the forward relationship:
+
+```text
+parent -> child
+```
+
+The pointer map supplies information in the reverse direction:
+
+```text
+child -> parent/type
+```
+
+This is why the memorable rule is: **autovacuum moves pages; pointer maps make
+pages movable**. The separate `pBt->incrVacuum` flag distinguishes incremental
+autovacuum from full autovacuum.
+
+Autovacuum's page movement is also why `allocateBtreePage()` has constrained
+allocation modes. Ordinary allocation usually needs `BTALLOC_ANY`. Autovacuum
+may need `BTALLOC_EXACT` to remove or claim one particular page, or `BTALLOC_LE`
+to obtain a free page below a truncation boundary:
+
+```text
+before:  [used] [free] [used] [last used page]
+                       ^
+          move the last page into an earlier free slot
+          then truncate the old end of the file
+```
+
+With `SQLITE_OMIT_AUTOVACUUM` defined, `IfNotOmitAV(expr)` expands to `0`:
+
+```c
+#ifndef SQLITE_OMIT_AUTOVACUUM
+# define IfNotOmitAV(expr) (expr)
+#else
+# define IfNotOmitAV(expr) 0
+#endif
+```
+
+The allocation assertion then effectively requires `eMode==BTALLOC_ANY`, and
+the preprocessor removes the exact/less-than freelist searches and pointer-map
+page handling. `allocateBtreePage()` itself is still required because every
+database needs to allocate ordinary b-tree and overflow pages.
+
+Inside the compiled autovacuum branch, SQLite repeats the runtime assertion
+immediately before using the pointer map:
+
+```c
+if( eMode==BTALLOC_EXACT ){
+  ...
+  assert( pBt->autoVacuum );
+  rc = ptrmapGet(pBt, nearby, &eType, 0);
+}
+```
+
+The earlier allocation assertion already implies this condition, so the local
+assertion is logically redundant. It is still valuable because it documents
+and checks the requirement exactly where `ptrmapGet()` depends on pointer-map
+pages being present. `#ifndef SQLITE_OMIT_AUTOVACUUM` alone cannot establish
+that runtime condition; it only establishes that support exists in the binary.
+
+### Manual `VACUUM` is separate
+
+Disabling autovacuum for a database does not prevent:
+
+```sql
+VACUUM;
+```
+
+The mechanisms are different:
+
+```text
+VACUUM
+  explicitly rebuilds the whole database into a compact database image
+
+auto_vacuum
+  uses pointer maps to relocate individual pages and reclaim pages from the end
+```
+
+Therefore, `PRAGMA auto_vacuum=NONE` and a later manual `VACUUM` are compatible.
+Likewise, `SQLITE_OMIT_AUTOVACUUM` removes automatic and incremental autovacuum
+support, but does not by itself remove the SQL `VACUUM` command. That command
+has its own compile-time omission path, `SQLITE_OMIT_VACUUM` (and in this source
+is also unavailable when attach support is omitted).
+
 ```c
 pPage1 = pBt->pPage1;
 mxPage = btreePagecount(pBt);
