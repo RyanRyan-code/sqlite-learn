@@ -913,6 +913,16 @@ may still point to another trunk.
 If the trunk has no leaves and SQLite is not searching for a special page, the
 trunk page itself is removed from the freelist and returned as the allocation.
 
+Because `searchList==0`, this is the first and only trunk examined, so it cannot
+have a previously visited trunk:
+
+```c
+assert( pPrevTrunk==0 );
+```
+
+That is also why SQLite can unlink it by updating page 1's first-trunk field. A
+later trunk would instead require updating its previous trunk's next pointer.
+
 This updates page 1's first-trunk pointer:
 
 ```c
