@@ -114,3 +114,95 @@ modify page 11
 Page 11 needs no before-image for `s1`; rolling back to `s1` removes it. It
 does need one for `s2`; page 11 existed when `s2` began, so rolling back to
 `s2` must restore its contents from that moment.
+
+## When the sub-journal is updated in the followed bytecode path
+
+The standalone bytecode for:
+
+```sql
+CREATE TABLE t(a int);
+```
+
+contains `OP_Transaction` but no `OP_Savepoint`. In the normal autocommit
+execution, `pPager->nSavepoint` is zero, so its `sqlite3PagerWrite()` calls do
+not update a sub-journal.
+
+An explicit `SAVEPOINT` is a separate SQL statement with its own VDBE program:
+
+```text
+program for SAVEPOINT s:
+  OP_Savepoint                 update connection savepoint state
+
+later program for CREATE TABLE:
+  OP_Transaction
+    -> sqlite3BtreeBeginTrans()
+       -> sqlite3PagerOpenSavepoint()
+  OP_CreateBtree
+    -> allocateBtreePage()
+       -> sqlite3PagerWrite()
+          -> subjournalPageIfRequired()
+```
+
+`sqlite3PagerOpenSavepoint()` creates pager bookkeeping such as `nOrig`, the
+bit-vector, and the starting sub-journal record number. It does not eagerly
+copy every database page. The before-image is written lazily by the first
+later `sqlite3PagerWrite()` that needs it.
+
+During the append path, this distinction applies page by page:
+
+```text
+sqlite3PagerWrite(page 1)    page 1 existed, so preserve it before changing
+                             the database-size header
+
+sqlite3PagerWrite(page 11)   if nOrig was 10, page 11 needs no before-image
+```
+
+SQLite builds a statement's complete opcode array during `sqlite3_prepare()`
+and executes it later during `sqlite3_step()`. The compiler does not bake the
+current pager savepoint count into `CREATE TABLE` bytecode. `OP_Transaction`
+and `sqlite3PagerWrite()` consult the connection and pager state at runtime.
+
+## WAL mode
+
+WAL mode replaces the main rollback journal, but not pager savepoint
+bookkeeping or the sub-journal:
+
+```text
+rollback-journal mode:
+  main journal    transaction-start images
+  sub-journal     savepoint-start images
+
+WAL mode:
+  WAL frames      transaction changes
+  WAL savepoint   position/state to rewind
+  sub-journal     page images needed for savepoint rollback
+```
+
+On WAL savepoint rollback, SQLite calls `sqlite3WalSavepointUndo()` and then
+plays back relevant sub-journal records. Therefore `subjRequiresPage()`,
+`nOrig`, and `pInSavepoint` still apply in WAL mode.
+
+## The already-writable fast path
+
+`sqlite3PagerWrite()` avoids repeating `pager_write()` when:
+
+```c
+(pPg->flags & PGHDR_WRITEABLE)!=0 && pPager->dbSize>=pPg->pgno
+```
+
+The page has already been journaled as required for the transaction, marked
+dirty, and included in the logical database size. If a savepoint is active,
+SQLite still checks the sub-journal because the savepoint may have opened
+after the page first became writable:
+
+```text
+write page 7       pager_write() preserves A; page becomes writable; A -> B
+SAVEPOINT s
+write page 7       skip pager_write(), but sub-journal B before B -> C
+ROLLBACK TO s      restore B
+```
+
+The `dbSize>=pgno` part matters because savepoint rollback can shrink the
+logical image while a cached page beyond the new end still carries
+`PGHDR_WRITEABLE`. Reusing that page must run `pager_write()` again so it can
+extend `dbSize` and perform the current bookkeeping.
