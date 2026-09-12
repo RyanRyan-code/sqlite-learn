@@ -886,6 +886,28 @@ do {
 If `searchList` is false, the loop normally runs once. If `searchList` is true,
 SQLite walks trunk by trunk until it finds the exact/suitable page.
 
+`searchList` can still be zero when execution reaches the leaf-extraction
+condition:
+
+```c
+if( !searchList
+ || (iPage==nearby || (iPage<nearby && eMode==BTALLOC_LE))
+){
+  /* allocate iPage */
+}
+```
+
+That is the common `BTALLOC_ANY` path. It is also possible for
+`BTALLOC_EXACT`: if the pointer map does not report `nearby` as free, an exact
+allocation is not possible, so `searchList` remains zero and SQLite falls back
+to a leaf from the head trunk. Thus the condition means:
+
+```text
+searchList == 0  -> accept the chosen head-trunk leaf immediately
+searchList == 1  -> accept only an exact or <= nearby match;
+                    otherwise continue to the next trunk
+```
+
 ### Head-trunk choice versus an exact search
 
 For ordinary `BTALLOC_ANY`, SQLite examines only the first (head) trunk. A
