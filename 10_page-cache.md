@@ -95,6 +95,34 @@ PCache.pDirty
 It is linked through each page's `pDirtyNext` and `pDirtyPrev` fields.
 `FRONT` removes a page from its current position and adds it at the head.
 
+### How the LRU order is maintained
+
+When the last user of a dirty page releases it, its reference count reaches
+zero and SQLite moves it to the front:
+
+```text
+sqlite3PcacheRelease(page)
+  -> nRef becomes 0
+     -> pcacheManageDirtyList(page, PCACHE_DIRTYLIST_FRONT)
+```
+
+For example:
+
+```text
+before using page 1:
+  page 7 <-> page 3 <-> page 1
+  newest                    oldest
+
+after using and releasing page 1:
+  page 1 <-> page 7 <-> page 3
+  newest                    oldest
+```
+
+This is an approximate LRU based on when active use finishes. SQLite does not
+reorder the list for every byte access. Because the list is doubly linked,
+removing a page and inserting it at the head only updates a few known pointers;
+it is constant-time work rather than a scan of the list.
+
 ## The two different `pDirty` names
 
 `PCache.pDirty` and `PgHdr.pDirty` do not form one directly linked chain.
@@ -120,6 +148,15 @@ The same `PgHdr` objects can therefore participate in both lists:
 ```text
 pDirtyNext/pDirtyPrev  persistent cache LRU list
 PgHdr.pDirty           temporary page-number-sorted list
+```
+
+The two orders are independent because they use separate link fields. Changing
+the temporary `PgHdr.pDirty` chain does not rearrange `pDirtyNext` or
+`pDirtyPrev`, and changing the LRU chain does not determine page-number order:
+
+```text
+LRU order:          page 9 <-> page 2 <-> page 7
+page-number order:  page 2  -> page 7  -> page 9
 ```
 
 A clearer mental renaming is:
