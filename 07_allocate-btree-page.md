@@ -899,7 +899,12 @@ This updates page 1's first-trunk pointer:
 
 ```c
 memcpy(&pPage1->aData[32], &pTrunk->aData[0], 4);
+*ppPage = pTrunk;
 ```
+
+Here `ppPage` means "pointer to the caller's page-pointer output". It is not a
+parent-page pointer. The assignment returns the selected trunk page through
+that output parameter.
 
 The first trunk becomes the next trunk.
 
