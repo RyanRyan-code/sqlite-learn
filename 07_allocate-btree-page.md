@@ -848,6 +848,16 @@ if( k==0 && !searchList ){
 k = get4byte(&pTrunk->aData[4]);
 ```
 
+It is not the next-trunk page number. These are separate fields:
+
+```text
+pTrunk->aData[0..3]  next trunk page number
+pTrunk->aData[4..7]  k, number of leaf page numbers
+```
+
+Therefore `k==0` only means that this trunk has no leaves. Its offset-0 field
+may still point to another trunk.
+
 If the trunk has no leaves and SQLite is not searching for a special page, the
 trunk page itself is removed from the freelist and returned as the allocation.
 
