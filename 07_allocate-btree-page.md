@@ -1098,6 +1098,47 @@ if old content may matter
   -> let pager read/journal it
 ```
 
+Inside the pager, the flag becomes a boolean:
+
+```c
+noContent = (flags & PAGER_GET_NOCONTENT) != 0;
+```
+
+It changes both cache handling and disk I/O:
+
+| Cached/initialized page? | `noContent` | Result |
+| --- | --- | --- |
+| Yes | false | Return the cached bytes immediately |
+| Yes | true | Discard the cached bytes and zero the buffer |
+| No | false | Read the existing page from the database file |
+| No | true | Skip the disk read and zero the buffer |
+
+Thus `noContent` also bypasses the usual cache-hit return. The caller asked for
+a buffer for a page whose previous bytes are irrelevant, not for those bytes.
+
+The pager also sets the page's transaction and savepoint bit-vector entries:
+
+```c
+sqlite3BitvecSet(pPager->pInJournal, pgno);
+addToSavepointBitvecs(pPager, pgno);
+```
+
+This treats the irrelevant old image as already accounted for, so a later
+`sqlite3PagerWrite()` need not journal it. No journal record has to be written
+by these calls. If setting a bit fails, correctness is unaffected; SQLite may
+merely do unnecessary journaling later.
+
+For the allocation path, `pTrunk` and the selected leaf page have different
+requirements:
+
+```text
+pTrunk  contains freelist metadata -> preserve/journal before changing it
+iPage   is a freelist leaf          -> old body is normally irrelevant
+```
+
+The `pHasContent` check supplies the exception for a leaf whose
+pre-transaction image may still be needed for rollback.
+
 ### How `pHasContent` is maintained
 
 `pHasContent` is a transaction-local bit-vector that records history, not the

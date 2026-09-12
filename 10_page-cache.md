@@ -45,6 +45,39 @@ PgHdr   cache metadata for one page
 MemPage b-tree interpretation of one page
 ```
 
+## Pager getter dispatch with a function pointer
+
+SQLite is C, so `Pager` does not have C++-style methods. It does have an `xGet`
+field that stores a function pointer:
+
+```c
+int (*xGet)(Pager *, Pgno, DbPage **, int);
+```
+
+`sqlite3PagerGet()` is a small dispatch wrapper:
+
+```c
+return pPager->xGet(pPager, pgno, ppPage, flags);
+```
+
+The call is equivalent to `(*pPager->xGet)(...)`. During `sqlite3PagerOpen()`,
+`setGetterMethod()` assigns a valid implementation before returning the new
+Pager:
+
+```text
+normal access   -> getPageNormal
+memory mapping  -> getPageMMap
+pager error     -> getPageError
+```
+
+SQLite may call `setGetterMethod()` again when those conditions change. This is
+C-style dynamic dispatch: the function receives `pPager` explicitly instead of
+an implicit C++ `this` pointer.
+
+The `#if 0` branch inside `sqlite3PagerGet()` is compile-time-disabled tracing.
+Changing it to `#if 1` compiles extra page-number and error logging; normal
+builds contain only the direct `xGet` call.
+
 ## What `PgHdr.nRef` counts
 
 `nRef` counts active lifetime claims that keep a cached page pinned. It does
