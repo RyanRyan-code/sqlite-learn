@@ -97,6 +97,22 @@ MemPage *pPrevTrunk = 0;
 Pgno mxPage;     /* Total size of the database file */
 ```
 
+The `= 0` initializers on `pTrunk` and `pPrevTrunk` are necessary because
+automatic local variables in C are not initialized by default. Without an
+initializer:
+
+```c
+MemPage *pTrunk;  /* indeterminate pointer value, not automatically NULL */
+```
+
+Reading that value in `if( pTrunk )` or passing it to `releasePage(pTrunk)`
+would be undefined behavior. Initializing it with `0` creates a null pointer
+that safely means "no page has been acquired yet".
+
+Other locals can omit an initializer only when every path assigns them before
+their first read. Initialization is about preventing an indeterminate value
+from being used, not a requirement that every local declaration contain `= 0`.
+
 `pPage1` is a local pointer to page 1:
 
 ```c
