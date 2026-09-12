@@ -97,8 +97,19 @@ It is linked through each page's `pDirtyNext` and `pDirtyPrev` fields.
 
 ### How the LRU order is maintained
 
-When the last user of a dirty page releases it, its reference count reaches
-zero and SQLite moves it to the front:
+There is no separate call that later sorts this list into LRU order. Assuming
+the callers satisfy each operation's preconditions, every call leaves the list
+in LRU order:
+
+```text
+ADD     insert a newly dirty page at the front; it is the newest
+REMOVE  unlink one page; the relative order of the others is unchanged
+FRONT   remove an existing dirty page and add it back as the newest
+```
+
+The caller identifies the event; `pcacheManageDirtyList()` performs the
+corresponding pointer changes. For example, when the last user of a dirty page
+releases it, its reference count reaches zero and the caller requests `FRONT`:
 
 ```text
 sqlite3PcacheRelease(page)
@@ -120,8 +131,8 @@ after using and releasing page 1:
 
 This is an approximate LRU based on when active use finishes. SQLite does not
 reorder the list for every byte access. Because the list is doubly linked,
-removing a page and inserting it at the head only updates a few known pointers;
-it is constant-time work rather than a scan of the list.
+each operation updates only a few known pointers and takes constant time; no
+LRU sort or full-list scan is required.
 
 ## The two different `pDirty` names
 
