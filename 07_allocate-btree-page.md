@@ -886,6 +886,35 @@ do {
 If `searchList` is false, the loop normally runs once. If `searchList` is true,
 SQLite walks trunk by trunk until it finds the exact/suitable page.
 
+### Head-trunk choice versus an exact search
+
+For ordinary `BTALLOC_ANY`, SQLite examines only the first (head) trunk. A
+nonzero `nearby` value chooses the closest leaf among that trunk's leaves; it
+does not trigger a search for the globally closest leaf elsewhere in the trunk
+chain.
+
+`BTALLOC_EXACT` is different. If the pointer map says that `nearby` is free,
+SQLite starts at the head and follows the trunk chain until it finds that exact
+page. An awkward exact target near the end of a long chain therefore costs a
+full-chain scan:
+
+```text
+head T1 -> T2 -> T3 -> ... -> T1000
+                                  ^ exact target
+```
+
+Removing an exact leaf from a later trunk decrements that trunk's leaf count.
+If its last leaf is removed, the empty trunk remains linked; it is not unlinked
+merely because its leaf count reached zero. This means repeated exact removals
+can leave a long, sparsely populated trunk chain. If the exact target is the
+trunk page itself, SQLite does unlink it, promoting one of its leaves to be the
+replacement trunk when necessary.
+
+The chain is still bounded by the number of freelist pages, and ordinary
+allocation eventually drains the head trunk and then reuses that trunk page.
+`BTALLOC_EXACT` is an internal autovacuum mechanism rather than a page-selection
+control exposed directly by SQL.
+
 ## Case 1: use an empty trunk page
 
 ```c
@@ -981,9 +1010,11 @@ memcpy(&pNewTrunk->aData[8], &pTrunk->aData[12], (k-1)*4);
 }
 ```
 
-If the trunk has free leaf pages, SQLite usually allocates one of those leaves.
+If the current trunk has free leaf pages, SQLite usually allocates one of those
+leaves.
 
-If `nearby>0`, it chooses the closest leaf page to `nearby`:
+If `nearby>0`, it chooses the closest leaf page to `nearby` among the leaves on
+that current trunk:
 
 ```c
 dist = sqlite3AbsInt32(get4byte(&aData[8]) - nearby);
