@@ -45,6 +45,37 @@ PgHdr   cache metadata for one page
 MemPage b-tree interpretation of one page
 ```
 
+## What `PgHdr.nRef` counts
+
+`nRef` counts active lifetime claims that keep a cached page pinned. It does
+not count C pointer variables:
+
+```c
+PgHdr *p = fetchedPage;  /* one acquired reference */
+PgHdr *q = p;            /* pointer copy; nRef does not change */
+```
+
+SQLite changes the count only through its reference APIs:
+
+```text
+PagerGet / PagerRef       nRef++
+PagerUnref / releasePage  nRef--
+```
+
+The page records only the count, not who owns each reference. That is why
+`releasePage(pPage)` needs no cursor or caller identifier. Higher-level code is
+responsible for balancing each acquired reference with one release.
+
+```text
+nRef == 0  no active holder keeps the page pinned
+nRef == 1  one active reference
+nRef > 1   multiple active references
+```
+
+For `btreeGetUnusedPage()`, the fetch itself creates one reference. A result of
+`nRef > 1` means something else was already holding a page that the freelist
+claims is unused, so SQLite reports corruption.
+
 ## What `sqlite3PcacheMakeDirty()` does
 
 `pager_write()` calls `sqlite3PcacheMakeDirty()` before page data is changed:
