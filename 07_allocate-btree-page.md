@@ -707,6 +707,21 @@ iTrunk = get4byte(&pPage1->aData[32]);
 n = get4byte(&pPage1->aData[36]);
 ```
 
+`iTrunk` is the integer database page number identifying the current trunk. It
+is not a pointer and not an array index. `pTrunk` is the corresponding pointer
+to the in-memory page object:
+
+```text
+iTrunk = 20              database page number/identifier
+
+btreeGetUnusedPage(pBt, iTrunk, &pTrunk, 0)
+                              |
+                              -> pTrunk now points to the MemPage for page 20
+```
+
+This follows a common SQLite naming distinction: `i...` holds an integer
+identifier or position, while `p...` holds a pointer.
+
 Each freelist trunk page contains:
 
 ```text
