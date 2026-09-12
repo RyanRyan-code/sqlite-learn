@@ -1098,6 +1098,31 @@ if old content may matter
   -> let pager read/journal it
 ```
 
+### How `pHasContent` is maintained
+
+`pHasContent` is a transaction-local bit-vector that records history, not the
+current type or contents of a page:
+
+```text
+write transaction starts
+  -> bit-vector is initially empty/null
+
+used page becomes a freelist leaf
+  -> btreeSetHasContent(pBt, iPage) sets its bit
+
+freelist leaf is reused
+  -> btreeGetHasContent(pBt, iPage) checks the bit
+  -> set: preserve the pre-transaction image for rollback
+  -> clear: PAGER_GET_NOCONTENT may skip reading the old bytes
+
+transaction commits or rolls back
+  -> btreeClearHasContent(pBt) destroys the bit-vector
+```
+
+Allocation deliberately does not clear an individual bit. Once a page has been
+freed during this transaction, its original image may remain relevant to
+transaction rollback even if the page is subsequently reused more than once.
+
 ## Appending a new page
 
 If the freelist is empty:
