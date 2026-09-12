@@ -918,11 +918,14 @@ This updates page 1's first-trunk pointer:
 ```c
 memcpy(&pPage1->aData[32], &pTrunk->aData[0], 4);
 *ppPage = pTrunk;
+pTrunk = 0;
 ```
 
 Here `ppPage` means "pointer to the caller's page-pointer output". It is not a
 parent-page pointer. The assignment returns the selected trunk page through
-that output parameter.
+that output parameter. Clearing the local `pTrunk` prevents the common cleanup
+code from releasing the reference that now belongs to the caller; it does not
+erase the page.
 
 The first trunk becomes the next trunk.
 
