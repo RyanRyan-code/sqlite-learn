@@ -1116,6 +1116,29 @@ It changes both cache handling and disk I/O:
 Thus `noContent` also bypasses the usual cache-hit return. The caller asked for
 a buffer for a page whose previous bytes are irrelevant, not for those bytes.
 
+There are two distinct copies in rollback-journal mode:
+
+```text
+sqlite3PagerGet():   database/WAL -> PgHdr.pData cache buffer
+sqlite3PagerWrite(): PgHdr.pData  -> rollback journal, when required
+```
+
+For example, with `noContent==0`:
+
+```text
+Get page 42    -> load old image A into pData if not already cached
+Write page 42  -> preserve A in the rollback journal, then allow modification
+caller         -> replace cached A with new image B
+rollback       -> restore A
+```
+
+`sqlite3PagerWrite()` relies on the cache buffer containing the correct old
+image; it does not ordinarily reread that image independently. With
+`noContent==1`, `Get` deliberately skips loading the old image and updates the
+journal bookkeeping so `Write` will not preserve the zeroed replacement as if
+it were the original. In WAL mode, the old committed version remains in the
+database/WAL snapshot instead of being copied to a main rollback journal.
+
 The pager also sets the page's transaction and savepoint bit-vector entries:
 
 ```c

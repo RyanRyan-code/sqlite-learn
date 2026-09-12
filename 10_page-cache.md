@@ -5,15 +5,14 @@
 A `Pager` manages one database image: its file access, transaction state,
 journal or WAL, logical database size, and page cache.
 
-A `PgHdr` describes one database page currently held in that cache:
+A `PgHdr` describes one database page currently held in that cache. The
+high-level relationship is:
 
 ```text
 Pager
   -> PCache
-       -> PgHdr for page 1
-       -> PgHdr for page 2
-       -> PgHdr for page 3
-       -> ...
+       -> pCache: lower cache containing all cached pages
+       -> pDirty: linked subset of dirty PgHdr objects
 ```
 
 The page points back to both owners:
@@ -44,6 +43,99 @@ PCache  collection of cached pages
 PgHdr   cache metadata for one page
 MemPage b-tree interpretation of one page
 ```
+
+## Where all cached pages and their bytes live
+
+`PCache.pDirty` is not the storage for the whole cache. The opaque
+`PCache.pCache` handle leads to the lower cache implementation, which performs
+lookup and owns every cached page, clean or dirty:
+
+```text
+PCache
+  |-- pCache -> lower cache
+  |              |-- page 1, clean
+  |              |-- page 2, dirty
+  |              |-- page 5, clean
+  |              `-- page 7, dirty
+  |
+  `-- pDirty -> page 2 <-> page 7
+```
+
+A dirty page therefore remains in the lower cache and is additionally linked
+into `PCache.pDirty` for commit, rollback, and spilling.
+
+At the lower interface, one cached page has this public shape:
+
+```c
+struct sqlite3_pcache_page {
+  void *pBuf;    /* Actual page-byte buffer */
+  void *pExtra;  /* Storage requested by SQLite core */
+};
+```
+
+`pcache.c` places a `PgHdr` in `pExtra` and wires its data pointer to the lower
+buffer:
+
+```c
+pPgHdr = (PgHdr *)pPage->pExtra;
+pPgHdr->pPage = pPage;
+pPgHdr->pData = pPage->pBuf;
+```
+
+Thus the page bytes are accessed through `PgHdr.pData`, but that pointer aliases
+the buffer allocated by the lower cache:
+
+```text
+sqlite3_pcache_page.pBuf <-----+
+                               |
+PgHdr.pData -------------------+
+```
+
+`readDbPage(pPg)` reads database or WAL bytes into `pPg->pData`. `MemPage.aData`
+later refers to the same bytes for b-tree interpretation.
+
+## `sqlite3_pcache_methods2` and the `pcache1` implementation
+
+`sqlite3_pcache_methods2` is a C vtable: a struct of function pointers defining
+the lower-cache interface. `pcache1.c` is SQLite's built-in implementation:
+
+```text
+interface function       default implementation
+xCreate                  pcache1Create
+xFetch                   pcache1Fetch
+xUnpin                   pcache1Unpin
+xRekey                   pcache1Rekey
+xTruncate                pcache1Truncate
+xDestroy                 pcache1Destroy
+```
+
+`sqlite3PCacheSetDefault()` installs these pointers into
+`sqlite3GlobalConfig.pcache2`. Calls from `pcache.c` then dispatch indirectly:
+
+```c
+sqlite3GlobalConfig.pcache2.xFetch(pCache->pCache, pgno, eCreate);
+```
+
+There is intentionally no definition of `struct sqlite3_pcache`. It is an
+incomplete type used only as an opaque handle. The built-in backend allocates
+its private concrete type and casts it to that handle:
+
+```c
+struct PCache1 { /* private hash table, limits, LRU state, ... */ };
+
+PCache1 *pCache = sqlite3MallocZero(sizeof(PCache1));
+return (sqlite3_pcache *)pCache;
+```
+
+Each `pcache1` callback casts the handle back before accessing fields:
+
+```c
+PCache1 *pCache = (PCache1 *)p;
+```
+
+An application may install another `sqlite3_pcache_methods2` table, but normal
+SQLite initialization selects `pcache1`. This is composition through an opaque
+pointer and function table, not C struct inheritance.
 
 ## Pager getter dispatch with a function pointer
 
@@ -94,6 +186,19 @@ SQLite changes the count only through its reference APIs:
 PagerGet / PagerRef       nRef++
 PagerUnref / releasePage  nRef--
 ```
+
+Repeated gets from the same Pager do not normally copy the page bytes:
+
+```text
+first PagerGet(page 5)
+  -> cache miss: allocate/fill one cache entry, nRef becomes 1
+
+second PagerGet(page 5)
+  -> cache hit: return the same PgHdr and pData, nRef becomes 2
+```
+
+A later get may allocate and refill a new buffer only after the old cache entry
+has been evicted. Separate Pager/cache instances may also hold separate copies.
 
 The page records only the count, not who owns each reference. That is why
 `releasePage(pPage)` needs no cursor or caller identifier. Higher-level code is
