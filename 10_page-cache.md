@@ -91,8 +91,22 @@ sqlite3_pcache_page.pBuf <-----+
 PgHdr.pData -------------------+
 ```
 
-`readDbPage(pPg)` reads database or WAL bytes into `pPg->pData`. `MemPage.aData`
-later refers to the same bytes for b-tree interpretation.
+For an ordinary PCache-backed page, this is an identity:
+
+```c
+pPgHdr->pData == pPgHdr->pPage->pBuf
+```
+
+They are two names for one buffer, not two buffers with a copy between them.
+The lower cache calls it `pBuf`; pager and b-tree code reach it through
+`PgHdr.pData`, and `MemPage.aData` later points at those same bytes for b-tree
+interpretation. `BtShared` is input context used to reach the pager; it is not
+where the fetched page content is stored.
+
+`readDbPage(pPg)` reads database or WAL bytes directly into this shared buffer.
+The exception is a memory-mapped page: it has no lower-cache page object
+(`pPg->pPage==0`), carries `PGHDR_MMAP`, and `pPg->pData` points directly at the
+mapped file memory.
 
 ## `sqlite3_pcache_methods2` and the `pcache1` implementation
 

@@ -1104,6 +1104,14 @@ Inside the pager, the flag becomes a boolean:
 noContent = (flags & PAGER_GET_NOCONTENT) != 0;
 ```
 
+In both cases, the returned `PgHdr.pData` buffer is initialized. The flag
+chooses the source of its bytes:
+
+```text
+noContent == 0  -> existing database/WAL bytes
+noContent == 1  -> zeroes, without reading the old page
+```
+
 It changes both cache handling and disk I/O:
 
 | Cached/initialized page? | `noContent` | Result |
@@ -1115,6 +1123,8 @@ It changes both cache handling and disk I/O:
 
 Thus `noContent` also bypasses the usual cache-hit return. The caller asked for
 a buffer for a page whose previous bytes are irrelevant, not for those bytes.
+It does not control whether `pData` exists or is filled; it controls whether
+SQLite preserves the old page image in that buffer or replaces it with zeroes.
 
 There are two distinct copies in rollback-journal mode:
 
