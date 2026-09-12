@@ -735,8 +735,26 @@ pager refcount > 1   another user still holds it; report corruption
 
 A page identified by the freelist is supposed to be free. If another cursor or
 operation is using it, the freelist and b-tree disagree, so SQLite must not
-overwrite it. The function also sets `isInit = 0` so stale b-tree metadata is
-not reused when the caller gives the page a new role.
+overwrite it.
+
+`MemPage.isInit` says whether the raw page bytes currently have a valid decoded
+B-tree interpretation in fields such as `leaf`, `nCell`, `cellOffset`, and
+`aCellIdx`:
+
+```text
+isInit == 1  derived MemPage B-tree fields are valid
+isInit == 0  do not treat the page as an initialized B-tree page
+```
+
+It does not say whether the raw bytes exist or are zero. A valid freelist,
+overflow, or pointer-map page is not a B-tree page and should have
+`isInit == 0`. Therefore a freelist page normally already has this value when
+`btreeGetUnusedPage()` fetches it.
+
+The assignment `(*ppPage)->isInit = 0` guarantees that postcondition for every
+allocation candidate. If the caller later turns the page into a B-tree page,
+`zeroPage()` writes the new B-tree format, initializes the derived fields, and
+sets `isInit = 1`.
 
 Thus "unused" does not mean "absent from the cache". It means that the page
 has no other active user and is safe to reformat or overwrite.
