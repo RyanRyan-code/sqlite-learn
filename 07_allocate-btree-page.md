@@ -722,6 +722,25 @@ btreeGetUnusedPage(pBt, iTrunk, &pTrunk, 0)
 This follows a common SQLite naming distinction: `i...` holds an integer
 identifier or position, while `p...` holds a pointer.
 
+### Why `btreeGetUnusedPage()` is not just `btreeGetPage()`
+
+`btreeGetUnusedPage()` first fetches the requested page through
+`btreeGetPage()`, then enforces that an allocation candidate is safe to
+repurpose:
+
+```text
+pager refcount == 1  only this fetch holds the page
+pager refcount > 1   another user still holds it; report corruption
+```
+
+A page identified by the freelist is supposed to be free. If another cursor or
+operation is using it, the freelist and b-tree disagree, so SQLite must not
+overwrite it. The function also sets `isInit = 0` so stale b-tree metadata is
+not reused when the caller gives the page a new role.
+
+Thus "unused" does not mean "absent from the cache". It means that the page
+has no other active user and is safe to reformat or overwrite.
+
 Each freelist trunk page contains:
 
 ```text
