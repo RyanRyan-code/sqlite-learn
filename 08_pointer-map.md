@@ -270,6 +270,17 @@ offset = PTRMAP_PTROFFSET(iPtrmap, key);
 if( pPgno ) *pPgno = get4byte(&pPtrmap[offset+1]);
 ```
 
+In C, array indexing is pointer arithmetic:
+
+```c
+pPtrmap[0]            == *pPtrmap
+pPtrmap[n]            == *(pPtrmap + n)
+&pPtrmap[offset+1]    == pPtrmap + offset + 1
+```
+
+So `get4byte()` receives the address of the first parent-number byte and reads
+the four bytes at offsets `offset+1` through `offset+4`.
+
 Step by step:
 
 ```text
