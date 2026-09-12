@@ -361,6 +361,45 @@ struct BtShared {
 The name `BtShared` means "the shareable part of a btree handle". It does not
 mean all connections to the same database file always share one `BtShared`.
 
+### `Btree.pNext` and `pPrev` do not describe tree pages
+
+The name `Btree` is easy to misread. A `Btree` object is not a node in an
+on-disk b-tree. It is a per-connection handle for one database file. One
+connection may therefore have several such handles:
+
+```text
+sqlite3 connection
+  |-- Btree for main.db
+  |-- Btree for aux.db
+  `-- Btree for another attached database
+```
+
+Its `pNext` and `pPrev` fields link the **sharable `Btree` handles belonging to
+that same connection**:
+
+```c
+Btree *pNext;  /* Other sharable Btrees from the same db connection */
+Btree *pPrev;
+```
+
+SQLite keeps this handle list sorted by `pBt` address. `sqlite3BtreeEnter()`
+uses that ordering when acquiring multiple `BtShared.mutex` objects, so every
+connection takes them in a consistent order and avoids deadlock. These pointers
+are connection and locking bookkeeping; they say nothing about b-tree shape.
+
+Actual tree relationships are represented differently:
+
+```text
+interior page bytes  -> child page numbers in cells + rightmost child
+leaf page bytes      -> records only; no sibling next/previous pointers
+BtCursor             -> apPage[]/aiIdx[] stack used to navigate through parents
+```
+
+Therefore a `MemPage` does not need general tree `pNext`/`pPrev` fields. Some
+special page formats do encode their own links in page bytes—for example, an
+overflow page's next-page number and a freelist trunk's next-trunk number—but
+those are format-specific chains, not the `Btree` handle list.
+
 ### Pointer fields that are really linked-list heads
 
 This SQLite field is a good C-language trap:
