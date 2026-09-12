@@ -170,6 +170,45 @@ LRU order:          page 9 <-> page 2 <-> page 7
 page-number order:  page 2  -> page 7  -> page 9
 ```
 
+### When and why page-number sorting happens
+
+For a file-backed autocommit `CREATE TABLE`, the temporary sorted list is
+normally built when `OP_Halt` commits the completed statement:
+
+```text
+OP_Halt
+  -> sqlite3VdbeHalt()
+     -> vdbeCommit()
+        -> sqlite3BtreeCommitPhaseOne()
+           -> sqlite3PagerCommitPhaseOne()
+              -> sqlite3PcacheDirtyList()
+                 -> pcacheSortDirtyList()
+```
+
+The resulting ascending page numbers correspond to ascending file offsets:
+
+```text
+page 1 -> offset 0
+page 2 -> offset pageSize
+page 7 -> offset 6 * pageSize
+```
+
+This turns an LRU order such as `7, 1, 4, 2` into the write order
+`1, 2, 4, 7`. Sequential file offsets improve write locality and reduce
+seeking. In WAL mode the pager likewise passes a page-number-sorted list to
+the WAL-frame writer.
+
+The two orders therefore solve different problems:
+
+```text
+LRU order          choose a dirty page to spill under cache pressure
+page-number order  flush a batch of dirty pages efficiently
+```
+
+`EXPLAIN CREATE TABLE ...` only displays bytecode and does not execute the
+schema change. A pure `:memory:` database also normally has no disk-write
+reason to build this sorted commit list.
+
 A clearer mental renaming is:
 
 ```text
