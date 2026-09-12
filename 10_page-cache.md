@@ -44,6 +44,47 @@ PgHdr   cache metadata for one page
 MemPage b-tree interpretation of one page
 ```
 
+## `MemPage` is a lazy view over raw bytes
+
+`MemPage` does not replace the serialized page with a complete C structure. It
+is sidecar metadata containing a pointer to the raw buffer:
+
+```text
+MemPage
+  |-- pgno, hdrOffset, nCell, leaf, ...
+  `-- aData --------------------------------> raw page bytes
+```
+
+That distinction is especially visible in `BtShared.pPage1`:
+
+```text
+BtShared.pPage1 -> MemPage for page 1
+                       |
+                       `-- aData
+                            |-- bytes 0..99: database header
+                            `-- byte 100...: sqlite_schema b-tree page
+```
+
+Consequently, these expressions have completely different meanings:
+
+```c
+pPage1->aData[32]  /* Raw byte 32 of database page 1 */
+pPage1[32]         /* The 33rd MemPage object; not a page-byte access */
+```
+
+When `btreePageFromDbPage()` first attaches the wrapper, it sets basic fields
+such as `aData`, `pDbPage`, `pBt`, `pgno`, and:
+
+```c
+pPage->hdrOffset = pgno==1 ? 100 : 0;
+```
+
+`btreeInitPage()` later decodes selected b-tree-header facts into cached
+`MemPage` fields such as `leaf`, `nCell`, and `cellOffset`. Even after that,
+cells and records mostly remain serialized bytes and are parsed on demand.
+The 100-byte database header on page 1 is still accessed directly through
+`pPage1->aData`.
+
 ## Where all cached pages and their bytes live
 
 `PCache.pDirty` is not the storage for the whole cache. The opaque
